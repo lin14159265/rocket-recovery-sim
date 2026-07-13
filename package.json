@@ -1,0 +1,30 @@
+{
+  "name": "cz10b-net-recovery-lab",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace @recovery/web",
+    "build": "npm run build --workspace @recovery/web",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:core": "vitest run packages/sim-core",
+    "lab": "tsx tools/run-scenario.ts",
+    "lab:monte-carlo": "tsx tools/run-monte-carlo.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.23.1",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
+

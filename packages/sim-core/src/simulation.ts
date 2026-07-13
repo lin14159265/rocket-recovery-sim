@@ -1,0 +1,890 @@
+import type {
+  CapturePlanPayload,
+  ControlCommand,
+  DomainEvent,
+  NodeId,
+  Packet,
+  RocketMode,
+  ScenarioConfig,
+  SimulationRun,
+  SimulationSnapshot,
+  StateEstimate,
+  SupervisorState,
+  TelemetrySample,
+  VehicleStatePayload,
+  Vec3,
+  WinchCommandPayload,
+  WinchStatusPayload
+} from "./contracts";
+import { WINCH_IDS } from "./contracts";
+import {
+  CaptureCoordinator,
+  RocketController,
+  computeVerticalVelocityReference,
+  type CaptureCoordinatorOutput,
+  type NetControlFeedback
+} from "./control";
+import { AlphaBetaEstimator, ConstantAccelerationKalman } from "./estimation";
+import { DeterministicRng } from "./engine/rng";
+import { norm3, sub3 } from "./math";
+import { RecoveryMetricsAccumulator } from "./metrics";
+import {
+  RecoveryPlant,
+  createNeutralPlantInput,
+  type PlantStepInput,
+  type PlantStepResult,
+  type PreContactNetMode,
+  type WinchAxisValues
+} from "./plant";
+import { sampleGroundTracking, sampleRocketNavigation } from "./sensors";
+import { VirtualNetwork } from "./comms/network";
+import { createPacket } from "./comms/protocol";
+
+type WinchNodeId = (typeof WINCH_IDS)[number];
+
+export interface TimedWinchFault {
+  node: WinchNodeId;
+  startTimeS: number;
+  endTimeS?: number;
+}
+
+export interface TimedRadioBlackout {
+  startTimeS: number;
+  endTimeS: number;
+}
+
+export interface SimulationFaultPlan {
+  winchStuck?: TimedWinchFault[];
+  radioBlackouts?: TimedRadioBlackout[];
+}
+
+export interface SimulationOptions {
+  frameRateHz?: number;
+  stopOnTerminal?: boolean;
+  faults?: SimulationFaultPlan;
+  guidance?: {
+    captureDescentSpeedMps?: number;
+    maximumDescentSpeedMps?: number;
+    brakingAccelerationMps2?: number;
+    engineCutoffHeightM?: number;
+  };
+}
+
+interface WinchWireCommand extends WinchCommandPayload {
+  requestedMode: PreContactNetMode;
+}
+
+interface WinchWireStatus extends WinchStatusPayload {
+  sampledTick: number;
+}
+
+interface TensionWireStatus {
+  sampledTick: number;
+  tensionsN: [number, number, number, number];
+  contactDetected: boolean;
+  broken: boolean;
+  secured: boolean;
+}
+
+interface Received<T> {
+  payload: T;
+  receivedTick: number;
+}
+
+interface AttitudeSensorFrame {
+  attitudeWxyz: [number, number, number, number];
+  angularVelocityRadps: Vec3;
+}
+
+interface EstimatorLike {
+  readonly initialized: boolean;
+  update(measurement: Parameters<AlphaBetaEstimator["update"]>[0]): StateEstimate;
+  snapshot(): StateEstimate | null;
+}
+
+const terminalSupervisorStates = new Set<SupervisorState>([
+  "SECURED",
+  "MISSED",
+  "BROKEN",
+  "ABORT"
+]);
+
+const winchAxisIndex: Record<WinchNodeId, 0 | 1 | 2 | 3> = {
+  "winch-x-negative": 0,
+  "winch-x-positive": 1,
+  "winch-y-negative": 2,
+  "winch-y-positive": 3
+};
+
+const axisStateFor = (step: PlantStepResult, node: WinchNodeId) => {
+  switch (node) {
+    case "winch-x-negative": return step.net.xNegative;
+    case "winch-x-positive": return step.net.xPositive;
+    case "winch-y-negative": return step.net.yNegative;
+    case "winch-y-positive": return step.net.yPositive;
+  }
+};
+
+const intervalTicks = (rateHz: number, physicsDtS: number, label: string): number => {
+  if (!Number.isFinite(rateHz) || rateHz <= 0) {
+    throw new RangeError(`${label} must be finite and greater than zero`);
+  }
+  const raw = 1 / (rateHz * physicsDtS);
+  const rounded = Math.round(raw);
+  if (rounded < 1 || Math.abs(raw - rounded) > 1e-8) {
+    throw new RangeError(`${label} must be an integer divisor of the physics tick rate`);
+  }
+  return rounded;
+};
+
+const cloneEstimate = (estimate: StateEstimate, source = estimate.source): StateEstimate => ({
+  ...estimate,
+  positionM: [...estimate.positionM],
+  velocityMps: [...estimate.velocityMps],
+  accelerationMps2: [...estimate.accelerationMps2],
+  covarianceDiagonal: [...estimate.covarianceDiagonal],
+  source
+});
+
+const sampleAttitudeSensors = (step: PlantStepResult): AttitudeSensorFrame => ({
+  // The public parameter set contains no attitude-sensor noise. Keeping this
+  // explicit sampling boundary prevents the controller from accepting TruthState.
+  attitudeWxyz: [...step.rocket.attitudeWxyz],
+  angularVelocityRadps: [...step.rocket.angularVelocityRadps]
+});
+
+const netModeForSupervisor = (state: SupervisorState): PreContactNetMode => {
+  if (state === "BOOT" || state === "SEARCH") return "open";
+  if (state === "CLOSING" || state === "CONTACT" || state === "ARREST" || state === "SECURED") {
+    return "closing";
+  }
+  return "tracking";
+};
+
+const axisPositionsFromCommands = (
+  commands: Record<WinchNodeId, WinchWireCommand>
+): WinchAxisValues<number> => [
+  commands["winch-x-negative"].desiredPositionM,
+  commands["winch-x-positive"].desiredPositionM,
+  commands["winch-y-negative"].desiredPositionM,
+  commands["winch-y-positive"].desiredPositionM
+];
+
+const makeInitialWinchCommands = (config: ScenarioConfig): Record<WinchNodeId, WinchWireCommand> => ({
+  "winch-x-negative": {
+    windowId: 0,
+    desiredPositionM: -config.net.openHalfSpacingM,
+    desiredTensionN: 0,
+    controlMode: "position",
+    requestedMode: "open"
+  },
+  "winch-x-positive": {
+    windowId: 0,
+    desiredPositionM: config.net.openHalfSpacingM,
+    desiredTensionN: 0,
+    controlMode: "position",
+    requestedMode: "open"
+  },
+  "winch-y-negative": {
+    windowId: 0,
+    desiredPositionM: -config.net.openHalfSpacingM,
+    desiredTensionN: 0,
+    controlMode: "position",
+    requestedMode: "open"
+  },
+  "winch-y-positive": {
+    windowId: 0,
+    desiredPositionM: config.net.openHalfSpacingM,
+    desiredTensionN: 0,
+    controlMode: "position",
+    requestedMode: "open"
+  }
+});
+
+const blackoutActive = (tick: number, dtS: number, faults?: SimulationFaultPlan): boolean => {
+  const timeS = tick * dtS;
+  return faults?.radioBlackouts?.some(
+    (fault) => timeS >= fault.startTimeS && timeS < fault.endTimeS
+  ) ?? false;
+};
+
+const activeWinchFaults = (
+  tick: number,
+  dtS: number,
+  faults?: SimulationFaultPlan
+): WinchAxisValues<boolean> => {
+  const timeS = tick * dtS;
+  const values: WinchAxisValues<boolean> = [false, false, false, false];
+  for (const fault of faults?.winchStuck ?? []) {
+    if (timeS >= fault.startTimeS && (fault.endTimeS === undefined || timeS < fault.endTimeS)) {
+      values[winchAxisIndex[fault.node]] = true;
+    }
+  }
+  return values;
+};
+
+const makeGroundEstimator = (config: ScenarioConfig): EstimatorLike => {
+  const common = {
+    tickDurationS: config.physicsDtS,
+    positionMeasurementVarianceM2: config.sensors.groundPositionNoiseM ** 2,
+    velocityMeasurementVarianceM2ps2: config.sensors.groundVelocityNoiseMps ** 2
+  };
+  return config.controller.algorithm === "predictive"
+    ? new ConstantAccelerationKalman({ ...common, jerkProcessNoiseM2ps5: 0.22 })
+    : new AlphaBetaEstimator({ ...common, alpha: 0.82, beta: 0.12 });
+};
+
+const makeRocketEstimator = (config: ScenarioConfig): EstimatorLike => {
+  const common = {
+    tickDurationS: config.physicsDtS,
+    positionMeasurementVarianceM2: config.sensors.rocketPositionNoiseM ** 2,
+    velocityMeasurementVarianceM2ps2: config.sensors.rocketVelocityNoiseMps ** 2
+  };
+  return config.controller.algorithm === "predictive"
+    ? new ConstantAccelerationKalman({ ...common, jerkProcessNoiseM2ps5: 0.18 })
+    : new AlphaBetaEstimator({ ...common, alpha: 0.82, beta: 0.12 });
+};
+
+const makePlatformEstimator = (config: ScenarioConfig): ConstantAccelerationKalman =>
+  new ConstantAccelerationKalman({
+    tickDurationS: config.physicsDtS,
+    positionMeasurementVarianceM2: config.sensors.groundPositionNoiseM ** 2,
+    velocityMeasurementVarianceM2ps2: config.sensors.groundVelocityNoiseMps ** 2,
+    // The deck motion is smooth and low-frequency. A low jerk noise avoids
+    // projecting raw 100 Hz position noise into an impossible future plane.
+    jerkProcessNoiseM2ps5: 0.01
+  });
+
+const sequenceSource = () => {
+  const values = new Map<NodeId, number>();
+  return (source: NodeId): number => {
+    const next = values.get(source) ?? 0;
+    values.set(source, next + 1);
+    return next;
+  };
+};
+
+const send = <T>(
+  network: VirtualNetwork,
+  nextSequence: (source: NodeId) => number,
+  source: NodeId,
+  destination: NodeId,
+  type: Packet<T>["header"]["type"],
+  tick: number,
+  ttlTicks: number,
+  payload: T
+): void => {
+  network.send(createPacket({
+    source,
+    destination,
+    type,
+    sequence: nextSequence(source),
+    producedTick: tick,
+    expiresTick: tick + ttlTicks
+  }, payload), tick);
+};
+
+const receivedWinchFeedback = (
+  tick: number,
+  config: ScenarioConfig,
+  statuses: Partial<Record<WinchNodeId, Received<WinchWireStatus>>>,
+  tension: Received<TensionWireStatus> | null
+): NetControlFeedback => {
+  const timeoutTicks = Math.ceil(0.12 / config.physicsDtS);
+  const current = WINCH_IDS.map((node) => statuses[node]);
+  const fresh = current.every(
+    (received) => received !== undefined && tick - received.receivedTick <= timeoutTicks
+  );
+  const position = (node: WinchNodeId, fallback: number): number =>
+    statuses[node]?.payload.positionM ?? fallback;
+  const negativeX = position("winch-x-negative", -config.net.openHalfSpacingM);
+  const positiveX = position("winch-x-positive", config.net.openHalfSpacingM);
+  const negativeY = position("winch-y-negative", -config.net.openHalfSpacingM);
+  const positiveY = position("winch-y-positive", config.net.openHalfSpacingM);
+  const tensionFresh = tension !== null && tick - tension.receivedTick <= timeoutTicks;
+  return {
+    centerM: [(negativeX + positiveX) / 2, (negativeY + positiveY) / 2],
+    halfSpacingM: [
+      Math.max(0, (positiveX - negativeX) / 2),
+      Math.max(0, (positiveY - negativeY) / 2)
+    ],
+    winchesReady: fresh,
+    anyWinchStuck: current.some((received) => received?.payload.stuck === true),
+    contactDetected: tensionFresh ? tension.payload.contactDetected : false,
+    broken: tensionFresh ? tension.payload.broken : false,
+    secured: tensionFresh ? tension.payload.secured : false,
+    tensionsN: tensionFresh ? [...tension.payload.tensionsN] : [0, 0, 0, 0]
+  };
+};
+
+const rocketModeFor = (
+  altitudeAbovePlaneM: number,
+  captureReady: boolean,
+  engineCutoff: boolean,
+  abortReceived: boolean,
+  supervisorState: SupervisorState
+): RocketMode => {
+  if (abortReceived || supervisorState === "ABORT" || supervisorState === "BROKEN") return "DIVERT";
+  if (["CONTACT", "ARREST", "SECURED"].includes(supervisorState)) return "CAPTURED";
+  if (engineCutoff) return "ENGINE_CUTOFF";
+  if (captureReady) return "CAPTURE_READY";
+  if (altitudeAbovePlaneM < 120) return "TERMINAL";
+  if (altitudeAbovePlaneM < 350) return "APPROACH";
+  return "DESCENT";
+};
+
+const currentMetrics = (
+  accumulator: RecoveryMetricsAccumulator,
+  coordinator: CaptureCoordinatorOutput | null
+) => {
+  const metrics = accumulator.snapshot();
+  if (coordinator !== null && ["ABORT", "MISSED", "BROKEN"].includes(coordinator.state)) {
+    metrics.failed = true;
+    metrics.failureReason = coordinator.abortReason ?? metrics.failureReason ??
+      coordinator.state.toLowerCase();
+  }
+  return metrics;
+};
+
+const boundedNetworkStats = (network: VirtualNetwork, maximumLatencySamples = 512) => {
+  const stats = network.getStats();
+  if (stats.latencySamplesMs.length > maximumLatencySamples) {
+    stats.latencySamplesMs = stats.latencySamplesMs.slice(-maximumLatencySamples);
+  }
+  return stats;
+};
+
+const telemetryFor = (
+  step: PlantStepResult,
+  estimate: StateEstimate,
+  plan: CapturePlanPayload | null,
+  supervisorState: SupervisorState,
+  radioAgeMs: number,
+  gravityMps2: number
+): TelemetrySample => {
+  const relativePosition = sub3(step.rocket.positionM, step.platform.positionM);
+  const relativeVelocity = sub3(step.rocket.velocityMps, step.platform.velocityMps);
+  const lateralErrorM = Math.hypot(
+    relativePosition[0] - step.net.centerM[0],
+    relativePosition[1] - step.net.centerM[1]
+  );
+  const nonGravityForceN = sub3(step.forces.totalN, step.forces.gravityN);
+  return {
+    tick: step.tick,
+    timeS: step.timeS,
+    altitudeM: relativePosition[2],
+    speedMps: norm3(relativeVelocity),
+    verticalSpeedMps: relativeVelocity[2],
+    lateralErrorM,
+    estimateErrorM: norm3(sub3(estimate.positionM, step.rocket.positionM)),
+    netCenterM: [...step.net.centerM],
+    netHalfSpacingM: [...step.net.halfSpacingM],
+    predictedInterceptM: plan === null
+      ? [0, 0]
+      : [plan.predictedInterceptPositionM[0], plan.predictedInterceptPositionM[1]],
+    contactForceN: norm3(step.forces.contactN),
+    apparentLoadG: norm3(nonGravityForceN) / (step.rocket.massKg * gravityMps2),
+    ropeTensionsN: [...step.net.tensionsN],
+    radioAgeMs,
+    supervisorState
+  };
+};
+
+/**
+ * Runs a deterministic, multi-rate closed loop. Truth enters only the plant,
+ * explicit sensor samplers and the read-only recorder/metrics path. Controllers
+ * consume estimates and packets delivered by the virtual links.
+ */
+export const runSimulation = (
+  inputConfig: ScenarioConfig,
+  options: SimulationOptions = {}
+): SimulationRun => {
+  const config = structuredClone(inputConfig);
+  const dtS = config.physicsDtS;
+  const sensorTicks = intervalTicks(config.sensors.sensorRateHz, dtS, "sensorRateHz");
+  const controlTicks = intervalTicks(config.controller.controlRateHz, dtS, "controlRateHz");
+  const telemetryTicks = intervalTicks(config.controller.telemetryRateHz, dtS, "telemetryRateHz");
+  const netControlTicks = intervalTicks(config.controller.netControlRateHz, dtS, "netControlRateHz");
+  const frameRateHz = options.frameRateHz ?? 30;
+  if (!Number.isFinite(frameRateHz) || frameRateHz <= 0) {
+    throw new RangeError("frameRateHz must be finite and greater than zero");
+  }
+  const maximumTick = Math.round(config.durationS / dtS);
+  const radioTtlTicks = Math.ceil(0.5 / dtS);
+  const fieldbusTtlTicks = Math.ceil(0.08 / dtS);
+
+  // Independent streams prevent a changed packet-loss decision from changing
+  // the physical gust or sensor-noise sequence.
+  const plantRng = new DeterministicRng(config.seed ^ 0x1357_9bdf);
+  const rocketSensorRng = new DeterministicRng(config.seed ^ 0x2468_ace0);
+  const groundSensorRng = new DeterministicRng(config.seed ^ 0x55aa_33cc);
+  const platformSensorRng = new DeterministicRng(config.seed ^ 0x0f0f_f0f0);
+  const radioRng = new DeterministicRng(config.seed ^ 0x6c8e_9cf5);
+  const fieldbusRng = new DeterministicRng(config.seed ^ 0xa511_e9b3);
+
+  const plant = new RecoveryPlant(config, plantRng);
+  const radio = new VirtualNetwork(config.radio, dtS * 1_000, radioRng);
+  const fieldbus = new VirtualNetwork(config.fieldbus, dtS * 1_000, fieldbusRng);
+  const radioSequence = sequenceSource();
+  const fieldbusSequence = sequenceSource();
+  const rocketEstimator = makeRocketEstimator(config);
+  const groundEstimator = makeGroundEstimator(config);
+  const platformEstimator = makePlatformEstimator(config);
+  const rocketController = new RocketController(
+    config.controller,
+    config.rocket,
+    config.environment.gravityMps2
+  );
+  const coordinator = new CaptureCoordinator({
+    tickDurationS: dtS,
+    controller: config.controller,
+    net: config.net,
+    capturePlaneZ: config.platform.capturePlaneZ,
+    lateralAccelerationLimitMps2: config.rocket.lateralAccelerationLimitMps2,
+    // Hold the physical window through modest arrival-time model error. The
+    // plant's actual plane crossing remains the authoritative capture event.
+    missedGraceS: 1.5,
+    // Reserve one full wireless request/ack exchange plus prediction jitter
+    // before the minimum winch trajectory becomes infeasible.
+    commitMarginS: Math.max(
+      0.75,
+      2 * (config.radio.baseLatencyMs + config.radio.jitterMs) / 1_000 + 0.25
+    )
+  });
+  const metricsAccumulator = new RecoveryMetricsAccumulator();
+
+  const frames: SimulationSnapshot[] = [];
+  const telemetry: TelemetrySample[] = [];
+  const events: DomainEvent[] = [];
+  const runId = `${config.id}-seed-${config.seed}`;
+  const event = (
+    tick: number,
+    type: string,
+    severity: DomainEvent["severity"],
+    message: string
+  ): void => {
+    events.push({ tick, type, severity, message });
+  };
+  event(0, "SIMULATION_STARTED", "info", `场景“${config.name}”开始，seed=${config.seed}`);
+
+  let plantState = plant.getState();
+  let attitudeFrame = sampleAttitudeSensors(plantState);
+  let rocketEstimate: StateEstimate | null = null;
+  let groundEstimate: StateEstimate | null = null;
+  let platformEstimate: StateEstimate | null = null;
+  let latestVehicleAtCoordinator: VehicleStatePayload | null = null;
+  let latestVehicleDeliveryTick = -1;
+  let planAtRocket: CapturePlanPayload | null = null;
+  let abortReceivedAtRocket = false;
+  let readyAnnouncedWindow = -1;
+  let coordinatorOutput: CaptureCoordinatorOutput | null = null;
+  let previousSupervisorState: SupervisorState = "BOOT";
+  let previousHandshake = "IDLE";
+  let receivedTension: Received<TensionWireStatus> | null = null;
+  const receivedStatuses: Partial<Record<WinchNodeId, Received<WinchWireStatus>>> = {};
+  const deliveredWinchCommands = makeInitialWinchCommands(config);
+  let heldPlantInput: PlantStepInput = createNeutralPlantInput(config);
+  let nextFrameTimeS = 0;
+  let finalSnapshot: SimulationSnapshot | null = null;
+
+  for (let tick = 0; tick < maximumTick; tick += 1) {
+    if (tick % sensorTicks === 0) {
+      rocketEstimate = cloneEstimate(
+        rocketEstimator.update(sampleRocketNavigation(tick, plantState.rocket, config.sensors, rocketSensorRng)),
+        "rocket-nav"
+      );
+      groundEstimate = groundEstimator.update(
+        sampleGroundTracking(tick, plantState.rocket, config.sensors, groundSensorRng)
+      );
+      platformEstimate = platformEstimator.update(
+        sampleGroundTracking(tick, plantState.platform, config.sensors, platformSensorRng)
+      );
+      attitudeFrame = sampleAttitudeSensors(plantState);
+    }
+    if (rocketEstimate === null || groundEstimate === null || platformEstimate === null) {
+      throw new Error("estimators were not initialized at tick zero");
+    }
+
+    for (const packet of radio.advanceTo(tick)) {
+      if (packet.header.destination === "coordinator") {
+        if (packet.header.type === "VEHICLE_STATE") {
+          latestVehicleAtCoordinator = structuredClone(packet.payload as VehicleStatePayload);
+          latestVehicleDeliveryTick = tick;
+        } else if (packet.header.type === "CAPTURE_READY" && latestVehicleAtCoordinator !== null) {
+          latestVehicleAtCoordinator.captureReady = true;
+          latestVehicleDeliveryTick = tick;
+        }
+      } else if (packet.header.destination === "rocket") {
+        if (packet.header.type === "CAPTURE_PLAN" || packet.header.type === "COMMIT") {
+          planAtRocket = structuredClone(packet.payload as CapturePlanPayload);
+          abortReceivedAtRocket = false;
+        } else if (packet.header.type === "ABORT") {
+          abortReceivedAtRocket = true;
+        }
+      }
+    }
+
+    for (const packet of fieldbus.advanceTo(tick)) {
+      if (packet.header.destination === "coordinator") {
+        if (packet.header.type === "WINCH_STATUS" && WINCH_IDS.includes(packet.header.source as WinchNodeId)) {
+          receivedStatuses[packet.header.source as WinchNodeId] = {
+            payload: structuredClone(packet.payload as WinchWireStatus),
+            receivedTick: tick
+          };
+        } else if (packet.header.type === "TENSION_STATUS") {
+          receivedTension = {
+            payload: structuredClone(packet.payload as TensionWireStatus),
+            receivedTick: tick
+          };
+        }
+      } else if (
+        packet.header.source === "coordinator" &&
+        WINCH_IDS.includes(packet.header.destination as WinchNodeId) &&
+        packet.header.type === "WINCH_COMMAND"
+      ) {
+        deliveredWinchCommands[packet.header.destination as WinchNodeId] =
+          structuredClone(packet.payload as WinchWireCommand);
+      }
+    }
+
+    const agreedPlanAtRocket = planAtRocket !== null &&
+      ["SYNC", "ARMED", "CLOSING", "CONTACT", "ARREST", "SECURED"].includes(
+        planAtRocket.supervisorState
+      )
+      ? planAtRocket
+      : null;
+    // Before PREPARE the plan is only a diagnostic extrapolation and can be
+    // noisy. It must not move the flight target. The mission-frame deck plane
+    // is known a priori; an agreed plan may then refine its predicted height.
+    const capturePlaneWorldZ = agreedPlanAtRocket?.capturePlaneZ ??
+      config.platform.capturePlaneZ;
+    const captureReady = agreedPlanAtRocket !== null &&
+      !abortReceivedAtRocket &&
+      norm3(agreedPlanAtRocket.predictedInterceptVelocityMps) <=
+        config.controller.maxCaptureSpeedMps &&
+      agreedPlanAtRocket.confidenceRadiusM + config.controller.requiredApertureMarginM <
+        config.net.openHalfSpacingM - config.rocket.radiusM;
+
+    const radioSuppressed = blackoutActive(tick, dtS, options.faults);
+    if (tick % telemetryTicks === 0 && !radioSuppressed) {
+      const rocketMode = rocketModeFor(
+        rocketEstimate.positionM[2] - capturePlaneWorldZ,
+        captureReady,
+        false,
+        abortReceivedAtRocket,
+        coordinatorOutput?.state ?? "BOOT"
+      );
+      const vehiclePayload: VehicleStatePayload = {
+        estimate: cloneEstimate(rocketEstimate, "rocket-nav"),
+        attitudeWxyz: [...attitudeFrame.attitudeWxyz],
+        angularVelocityRadps: [...attitudeFrame.angularVelocityRadps],
+        rocketMode,
+        captureReady,
+        healthFlags: 0
+      };
+      send(
+        radio,
+        radioSequence,
+        "rocket",
+        "coordinator",
+        "VEHICLE_STATE",
+        tick,
+        radioTtlTicks,
+        vehiclePayload
+      );
+    }
+    if (
+      captureReady &&
+      agreedPlanAtRocket !== null &&
+      readyAnnouncedWindow !== agreedPlanAtRocket.windowId &&
+      !radioSuppressed
+    ) {
+      send(
+        radio,
+        radioSequence,
+        "rocket",
+        "coordinator",
+        "CAPTURE_READY",
+        tick,
+        radioTtlTicks,
+        { windowId: agreedPlanAtRocket.windowId }
+      );
+      readyAnnouncedWindow = agreedPlanAtRocket.windowId;
+    }
+
+    if (tick % netControlTicks === 0) {
+      for (const node of WINCH_IDS) {
+        const axis = axisStateFor(plantState, node);
+        const status: WinchWireStatus = {
+          sampledTick: tick,
+          positionM: axis.positionM,
+          velocityMps: axis.velocityMps,
+          tensionN: plantState.net.tensionsN[winchAxisIndex[node]],
+          stuck: axis.stuck
+        };
+        send(
+          fieldbus,
+          fieldbusSequence,
+          node,
+          "coordinator",
+          "WINCH_STATUS",
+          tick,
+          fieldbusTtlTicks,
+          status
+        );
+      }
+      const tensionStatus: TensionWireStatus = {
+        sampledTick: tick,
+        tensionsN: [...plantState.net.tensionsN],
+        contactDetected: ["latched", "arresting", "secured"].includes(plantState.net.mode),
+        broken: plantState.net.mode === "broken",
+        secured: plantState.net.mode === "secured"
+      };
+      send(
+        fieldbus,
+        fieldbusSequence,
+        "winch-x-negative",
+        "coordinator",
+        "TENSION_STATUS",
+        tick,
+        fieldbusTtlTicks,
+        tensionStatus
+      );
+
+      coordinatorOutput = coordinator.step({
+        tick,
+        vehicleState: latestVehicleAtCoordinator,
+        platformEstimate,
+        net: receivedWinchFeedback(tick, config, receivedStatuses, receivedTension)
+      });
+      if (coordinatorOutput.state !== previousSupervisorState) {
+        const severity: DomainEvent["severity"] = coordinatorOutput.state === "SECURED"
+          ? "success"
+          : ["ABORT", "MISSED", "BROKEN"].includes(coordinatorOutput.state)
+            ? "error"
+            : "info";
+        event(
+          tick,
+          "SUPERVISOR_TRANSITION",
+          severity,
+          `${previousSupervisorState} → ${coordinatorOutput.state}`
+        );
+        previousSupervisorState = coordinatorOutput.state;
+      }
+
+      const requestedMode = netModeForSupervisor(coordinatorOutput.state);
+      for (const node of WINCH_IDS) {
+        const wireCommand: WinchWireCommand = {
+          ...coordinatorOutput.winchCommands[node],
+          requestedMode
+        };
+        send(
+          fieldbus,
+          fieldbusSequence,
+          "coordinator",
+          node,
+          "WINCH_COMMAND",
+          tick,
+          fieldbusTtlTicks,
+          wireCommand
+        );
+      }
+
+      const handshakeChanged = coordinatorOutput.handshakePhase !== previousHandshake;
+      if (
+        coordinatorOutput.plan !== null &&
+        !radioSuppressed &&
+        (tick % telemetryTicks === 0 || handshakeChanged)
+      ) {
+        const type = coordinatorOutput.handshakePhase === "COMMIT"
+          ? "COMMIT"
+          : coordinatorOutput.handshakePhase === "ABORT"
+            ? "ABORT"
+            : "CAPTURE_PLAN";
+        send(
+          radio,
+          radioSequence,
+          "coordinator",
+          "rocket",
+          type,
+          tick,
+          radioTtlTicks,
+          coordinatorOutput.plan
+        );
+      }
+      previousHandshake = coordinatorOutput.handshakePhase;
+    }
+
+    if (tick % controlTicks === 0) {
+      const altitudeAbovePlaneM = rocketEstimate.positionM[2] - capturePlaneWorldZ;
+      const verticalVelocityReferenceMps = computeVerticalVelocityReference(
+        rocketEstimate,
+        capturePlaneWorldZ,
+        {
+          captureDescentSpeedMps: options.guidance?.captureDescentSpeedMps ?? 6,
+          maximumDescentSpeedMps: options.guidance?.maximumDescentSpeedMps ??
+            Math.max(6, Math.abs(config.rocket.initialVelocityMps[2])),
+          // Chosen so the calibrated 891 m / -58 m/s case reaches roughly
+          // 6 m/s at the capture plane; it is a study setting, not flight data.
+          brakingAccelerationMps2: options.guidance?.brakingAccelerationMps2 ?? 1.95
+        }
+      );
+      const engineCutoffHeightM = options.guidance?.engineCutoffHeightM ?? 0.7;
+      const committed = coordinatorOutput?.handshakePhase === "COMMIT";
+      const engineCutoff = committed && altitudeAbovePlaneM <= engineCutoffHeightM;
+      const engineEnabled = !engineCutoff &&
+        !["CONTACT", "ARREST", "SECURED"].includes(coordinatorOutput?.state ?? "BOOT");
+      // Both endpoints converge on the frozen relative capture centre after
+      // PREPARE. Before that, the rocket follows the nominal mission-frame
+      // deck centre while the coordinator only observes and predicts.
+      const targetPositionM: Vec3 = agreedPlanAtRocket === null
+        ? [0, 0, capturePlaneWorldZ]
+        : [agreedPlanAtRocket.centerM[0], agreedPlanAtRocket.centerM[1], capturePlaneWorldZ];
+      const targetVelocityMps: Vec3 = [
+        platformEstimate.velocityMps[0],
+        platformEstimate.velocityMps[1],
+        verticalVelocityReferenceMps
+      ];
+      const command: ControlCommand = rocketController.compute({
+        estimate: rocketEstimate,
+        attitudeWxyz: attitudeFrame.attitudeWxyz,
+        angularVelocityRadps: attitudeFrame.angularVelocityRadps,
+        targetPositionM,
+        targetVelocityMps,
+        verticalVelocityReferenceMps,
+        engineEnabled
+      });
+      const requestedRocketMode = rocketModeFor(
+        altitudeAbovePlaneM,
+        captureReady,
+        engineCutoff,
+        abortReceivedAtRocket,
+        coordinatorOutput?.state ?? "BOOT"
+      );
+      heldPlantInput = {
+        rocketControl: command,
+        netCommand: {
+          desiredAxisPositionsM: axisPositionsFromCommands(deliveredWinchCommands),
+          targetTotalTensionN: WINCH_IDS.reduce(
+            (sum, node) => sum + deliveredWinchCommands[node].desiredTensionN,
+            0
+          ),
+          requestedMode: deliveredWinchCommands["winch-x-negative"].requestedMode
+        },
+        requestedRocketMode
+      };
+    }
+    heldPlantInput.winchStuck = activeWinchFaults(tick, dtS, options.faults);
+
+    plantState = plant.step(heldPlantInput);
+    const metrics = metricsAccumulator.update(
+      plantState,
+      rocketEstimate,
+      config.environment.gravityMps2
+    );
+    if (plantState.capturedThisStep) {
+      event(plantState.tick, "CAPTURE", "success", "等效挂索点进入闭合网口并建立接触");
+    }
+    if (plantState.missedThisStep) {
+      event(
+        plantState.tick,
+        "CAPTURE_MISSED",
+        "error",
+        `捕获失败：${plantState.capture.rejectionReason ?? "unknown"}`
+      );
+    }
+    if (plantState.ropeBrokenThisStep) {
+      event(
+        plantState.tick,
+        "ROPE_BROKEN",
+        "error",
+        `等效绳失效：${plantState.failureReason ?? "unknown"}`
+      );
+    }
+    if (plantState.securedThisStep) {
+      event(plantState.tick, "SECURED", "success", "等效载荷进入稳定驻留判据");
+    }
+
+    const radioAgeMs = latestVehicleDeliveryTick < 0
+      ? Number.POSITIVE_INFINITY
+      : (tick - latestVehicleDeliveryTick) * dtS * 1_000;
+    if (plantState.tick % telemetryTicks === 0 || plantState.tick === 1) {
+      telemetry.push(telemetryFor(
+        plantState,
+        rocketEstimate,
+        coordinatorOutput?.plan ?? null,
+        coordinatorOutput?.state ?? "BOOT",
+        radioAgeMs,
+        config.environment.gravityMps2
+      ));
+    }
+
+    if (plantState.timeS + 1e-12 >= nextFrameTimeS) {
+      const snapshotMetrics = currentMetrics(metricsAccumulator, coordinatorOutput);
+      const snapshot: SimulationSnapshot = {
+        runId,
+        tick: plantState.tick,
+        timeS: plantState.timeS,
+        rocket: structuredClone(plantState.rocket),
+        platform: structuredClone(plantState.platform),
+        net: structuredClone(plantState.net),
+        rocketEstimate: cloneEstimate(rocketEstimate, "rocket-nav"),
+        groundEstimate: cloneEstimate(groundEstimate),
+        capturePlan: coordinatorOutput?.plan === null || coordinatorOutput === null
+          ? null
+          : structuredClone(coordinatorOutput.plan),
+        control: structuredClone(heldPlantInput.rocketControl),
+        supervisorState: coordinatorOutput?.state ?? "BOOT",
+        radioStats: boundedNetworkStats(radio),
+        fieldbusStats: boundedNetworkStats(fieldbus),
+        metrics: snapshotMetrics,
+        latestEvents: events.slice(-8).map((entry) => ({ ...entry }))
+      };
+      frames.push(snapshot);
+      finalSnapshot = snapshot;
+      nextFrameTimeS += 1 / frameRateHz;
+    }
+
+    if (
+      options.stopOnTerminal === true &&
+      coordinatorOutput !== null &&
+      terminalSupervisorStates.has(coordinatorOutput.state)
+    ) {
+      break;
+    }
+    void metrics;
+  }
+
+  if (finalSnapshot === null) {
+    throw new Error("simulation produced no snapshots");
+  }
+  const finalMetrics = currentMetrics(metricsAccumulator, coordinatorOutput);
+  finalSnapshot = {
+    ...finalSnapshot,
+    metrics: finalMetrics,
+    radioStats: radio.getStats(),
+    fieldbusStats: fieldbus.getStats(),
+    latestEvents: events.slice(-8).map((entry) => ({ ...entry }))
+  };
+  frames[frames.length - 1] = finalSnapshot;
+  event(
+    finalSnapshot.tick,
+    "SIMULATION_FINISHED",
+    finalMetrics.secured ? "success" : finalMetrics.failed ? "error" : "warning",
+    finalMetrics.secured
+      ? "仿真结束：已捕获并稳定"
+      : `仿真结束：${finalMetrics.failureReason ?? "未在时限内稳定"}`
+  );
+
+  return {
+    config,
+    frames,
+    telemetry,
+    events,
+    finalSnapshot: {
+      ...finalSnapshot,
+      latestEvents: events.slice(-8).map((entry) => ({ ...entry }))
+    },
+    metrics: finalMetrics
+  };
+};
