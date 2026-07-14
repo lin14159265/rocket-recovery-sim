@@ -1,1 +1,1 @@
-触发 GitHub Pages 工作流 PR 诊断，定位 build 作业失败步骤。
+触发 GitHub Pages API 极简诊断，读取 GET、POST、PUT 的完整 HTTP 响应。
