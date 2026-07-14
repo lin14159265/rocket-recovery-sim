@@ -1,1 +1,1 @@
-通过 pull_request synchronize 事件运行 v0.3.1 极简补丁冲突诊断。
+触发 v0.3.1 最终源码还原、67 项测试、版本固化和 GitHub Pages 部署。
