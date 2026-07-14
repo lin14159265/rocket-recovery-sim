@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - main
+  pull_request:
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: write
@@ -11,7 +13,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: "pages"
+  group: "pages-v0.3.1"
   cancel-in-progress: false
 
 jobs:
@@ -19,9 +21,10 @@ jobs:
     name: 应用修复、验证并生成网页
     runs-on: ubuntu-latest
     steps:
-      - name: 检出仓库
+      - name: 检出默认分支
         uses: actions/checkout@v4
         with:
+          ref: main
           fetch-depth: 0
 
       - name: 还原 v0.3.1 源码补丁
