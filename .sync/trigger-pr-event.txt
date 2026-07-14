@@ -1,1 +1,1 @@
-重试 v0.3.1：发布 validated/v0.3.1 分支并完成 GitHub Pages 部署。
+触发 v0.3.1 最终发布：先推送不含工作流文件的已验证源码，再部署 GitHub Pages。
