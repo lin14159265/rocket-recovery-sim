@@ -1,1 +1,1 @@
-触发 v0.3.1 质量门禁、静态构建并发布到 gh-pages 分支。
+复查管理员身份更新 gh-pages 后，GitHub 是否自动建立 Pages 站点。
