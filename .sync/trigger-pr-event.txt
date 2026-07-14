@@ -1,1 +1,1 @@
-触发 GitHub Pages API 极简诊断，读取 GET、POST、PUT 的完整 HTTP 响应。
+触发 v0.3.1 质量门禁、静态构建并发布到 gh-pages 分支。
