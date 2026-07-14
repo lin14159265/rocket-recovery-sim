@@ -22,6 +22,7 @@ import {
   RotateCcw,
   X
 } from "lucide-react";
+import { displayedConfigFor } from "../app-state";
 import { Inspector } from "./Inspector";
 import { PlaybackBar } from "./PlaybackBar";
 import "../dashboard.css";
@@ -247,7 +248,9 @@ export function Dashboard({
   const [cameraResetToken, setCameraResetToken] = useState(0);
   const [boundaryOpen, setBoundaryOpen] = useState(false);
   const durationS = run?.config.durationS ?? config.durationS;
-  const configFingerprint = fingerprintScenarioConfig(config);
+  const displayedConfig = displayedConfigFor(run, config);
+  const displayedFingerprint = run?.configFingerprint ?? fingerprintScenarioConfig(displayedConfig);
+  const draftFingerprint = fingerprintScenarioConfig(config);
   const stateLabel = frame === null
     ? busy ? "仿真计算中" : "等待运行"
     : STATE_LABELS[frame.supervisorState] ?? frame.supervisorState;
@@ -258,8 +261,8 @@ export function Dashboard({
       <header className="dashboard-header">
         <div className="dashboard-brand">
           <h1>井字网系回收概念模拟器</h1>
-          <p>公开机理代理模型 v{run?.modelVersion ?? SIMULATION_MODEL_VERSION} · seed {config.seed} · cfg {configFingerprint}</p>
-          {dirty ? <span className="dirty-indicator">参数已修改，点击“重启”应用</span> : null}
+          <p>公开机理代理模型 v{run?.modelVersion ?? SIMULATION_MODEL_VERSION} · 运行 seed {displayedConfig.seed} · cfg {displayedFingerprint}</p>
+          {dirty ? <span className="dirty-indicator">草稿 seed {config.seed} · cfg {draftFingerprint}，点击“重启”应用</span> : null}
         </div>
 
         <MetricStrip frame={frame} run={run} />
@@ -301,7 +304,7 @@ export function Dashboard({
           <Suspense fallback={<div className="panel-loading">正在装载三维视图…</div>}>
             <RecoveryScene
               frame={frame}
-              config={config}
+              config={displayedConfig}
               cameraFollow={cameraFollow}
               resetToken={cameraResetToken}
             />

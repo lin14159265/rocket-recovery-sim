@@ -1773,3 +1773,8 @@
     display: none;
   }
 }
+
+.sensitivity-boundary {
+  color: #ff9b6b;
+  font-weight: 750;
+}

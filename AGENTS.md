@@ -24,6 +24,7 @@
 - 安装：`npm install`
 - 开发：`npm run dev`
 - 构建：`npm run build`
+- GitHub Pages 构建：`GITHUB_PAGES=true npm run build`
 - 类型检查：`npm run typecheck`
 - 测试：`npm test`
 - 无界面名义场景：`npm run lab`

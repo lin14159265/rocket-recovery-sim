@@ -1,5 +1,5 @@
 import type { RecoveryMetrics, ScenarioConfig, SimulationRun, Vec3 } from "./contracts";
-import { dot3, norm3, sub3 } from "./math";
+import { norm3, sub3 } from "./math";
 import { runSimulation } from "./simulation";
 
 export type ValidationQuality = "good" | "caution" | "poor";
@@ -39,6 +39,8 @@ export interface StepConvergenceReport {
   cases: StepConvergenceCase[];
   comparisons: StepConvergenceComparison[];
   quality: ValidationQuality;
+  comparisonTimeS: number;
+  stochasticTermsDisabled: string[];
   interpretation: string;
 }
 
@@ -46,12 +48,25 @@ export interface EnergyBalanceReport {
   contactDetected: boolean;
   startTimeS: number | null;
   endTimeS: number;
+  physicsStepCount: number;
   initialRelativeKineticJ: number;
   finalRelativeKineticJ: number;
   gravitationalReleaseJ: number;
   contactWorkProxyJ: number;
   contactDissipationProxyJ: number;
+  initialElasticProxyJ: number;
   finalElasticProxyJ: number;
+  thrustWorkJ: number;
+  aerodynamicWorkJ: number;
+  platformBoundaryWorkJ: number;
+  translationalWorkResidualJ: number;
+  normalizedTranslationalResidual: number;
+  rotationalWorkResidualJ: number;
+  normalizedRotationalResidual: number;
+  gravityPotentialResidualJ: number;
+  normalizedGravityPotentialResidual: number;
+  contactPartitionResidualJ: number;
+  normalizedContactPartitionResidual: number;
   unobservedResidualJ: number;
   normalizedResidual: number;
   quality: ValidationQuality;
@@ -133,22 +148,46 @@ const convergenceQuality = (
   return "poor";
 };
 
+const createDeterministicConvergenceScenario = (config: ScenarioConfig): ScenarioConfig => {
+  const next = structuredClone(config);
+  next.environment.gustSigmaMps = 0;
+  next.sensors.rocketPositionNoiseM = 0;
+  next.sensors.rocketVelocityNoiseMps = 0;
+  next.sensors.groundPositionNoiseM = 0;
+  next.sensors.groundVelocityNoiseMps = 0;
+  for (const link of [next.radio, next.fieldbus]) {
+    link.jitterMs = 0;
+    link.lossRate = 0;
+    link.duplicateRate = 0;
+    link.corruptionRate = 0;
+  }
+  next.parameterSources["validation.convergence"] = {
+    status: "assumed",
+    source: "v0.3.1 数值验证方法",
+    note: "步长收敛运行关闭随机阵风、传感器噪声和随机链路事件，仅比较积分步长影响"
+  };
+  return next;
+};
+
 export const runStepConvergenceStudy = (
   config: ScenarioConfig,
   onProgress?: (progress: ValidationProgress) => void
 ): StepConvergenceReport => {
+  const deterministic = createDeterministicConvergenceScenario(config);
   const timeSteps = [config.physicsDtS, config.physicsDtS / 2, config.physicsDtS / 4];
   const cases: StepConvergenceCase[] = [];
   for (const [index, physicsDtS] of timeSteps.entries()) {
-    const next = structuredClone(config);
+    const next = structuredClone(deterministic);
     next.physicsDtS = physicsDtS;
-    next.id = `${config.id}-dt-${physicsDtS}`;
-    const run = runSimulation(next, { frameRateHz: 20, stopOnTerminal: true });
+    next.id = `${config.id}-deterministic-dt-${physicsDtS}`;
+    // All cases run to the same physical end time. A terminal state does not
+    // shorten one trajectory and thereby invalidate the final-state comparison.
+    const run = runSimulation(next, { frameRateHz: 2, stopOnTerminal: false });
     cases.push(toCase(run));
     onProgress?.({
       completed: index + 1,
       total: timeSteps.length + 1,
-      label: `步长 ${physicsDtS.toFixed(6)} s 完成`
+      label: `确定性步长 ${physicsDtS.toFixed(6)} s 完成`
     });
   }
   const comparisons = [
@@ -160,100 +199,148 @@ export const runStepConvergenceStudy = (
     cases,
     comparisons,
     quality,
+    comparisonTimeS: config.durationS,
+    stochasticTermsDisabled: [
+      "阵风随机过程",
+      "箭上与地面传感器随机噪声",
+      "无线与现场总线的抖动、丢包、重复和损坏"
+    ],
     interpretation: quality === "good"
-      ? "终态分类一致，关键连续指标随步长减半的变化不超过 5%。"
+      ? "在相同物理终止时刻和无随机扰动条件下，终态分类一致，关键连续指标变化不超过 5%。"
       : quality === "caution"
-        ? "终态分类一致，但至少一个关键指标仍有 5%–15% 的步长敏感性。"
-        : "终态分类或关键指标对步长明显敏感；不应据此给出定量工程结论。"
+        ? "终态分类一致，但至少一个关键指标仍有 5%–15% 的纯步长敏感性。"
+        : "终态分类或关键指标对积分步长明显敏感；不应据此给出定量工程结论。"
   };
 };
 
-const relativeVelocity = (frame: SimulationRun["frames"][number]): Vec3 =>
-  sub3(frame.rocket.velocityMps, frame.platform.velocityMps);
-
-const relativeAltitude = (frame: SimulationRun["frames"][number]): number =>
-  frame.rocket.positionM[2] - frame.platform.positionM[2];
+const normalizedResidual = (residual: number, ...scales: number[]): number =>
+  Math.abs(residual) / Math.max(1, ...scales.map((value) => Math.abs(value)));
 
 /**
- * Builds a transparent contact-phase proxy ledger. It deliberately leaves
- * aerodynamic, rotational, actuator and discretization terms in the residual.
+ * Evaluates a physics-tick ledger accumulated inside the simulation loop.
+ * It reports three separate closures instead of using display-frame samples:
+ * translational work-energy, rotational work-energy, and contact storage/damping.
  */
 export const evaluateEnergyBalance = (run: SimulationRun): EnergyBalanceReport => {
-  const contactIndex = run.frames.findIndex(
-    (frame) => norm3(frame.net.totalContactForceN) > 100 ||
-      ["latched", "arresting", "secured", "broken"].includes(frame.net.mode)
-  );
-  if (contactIndex < 0) {
+  const ledger = run.energyLedger;
+  if (!ledger.contactDetected) {
     return {
       contactDetected: false,
       startTimeS: null,
       endTimeS: run.finalSnapshot.timeS,
+      physicsStepCount: 0,
       initialRelativeKineticJ: 0,
       finalRelativeKineticJ: 0,
       gravitationalReleaseJ: 0,
       contactWorkProxyJ: 0,
       contactDissipationProxyJ: 0,
+      initialElasticProxyJ: 0,
       finalElasticProxyJ: 0,
+      thrustWorkJ: 0,
+      aerodynamicWorkJ: 0,
+      platformBoundaryWorkJ: 0,
+      translationalWorkResidualJ: 0,
+      normalizedTranslationalResidual: 0,
+      rotationalWorkResidualJ: 0,
+      normalizedRotationalResidual: 0,
+      gravityPotentialResidualJ: 0,
+      normalizedGravityPotentialResidual: 0,
+      contactPartitionResidualJ: 0,
+      normalizedContactPartitionResidual: 0,
       unobservedResidualJ: 0,
       normalizedResidual: 0,
       quality: "caution",
-      interpretation: "未发生接触，无法建立接触阶段能量账本。"
+      interpretation: "未发生接触，无法建立接触阶段的物理 tick 能量账本。"
     };
   }
 
-  const start = run.frames[Math.max(0, contactIndex - 1)]!;
-  const end = run.finalSnapshot;
-  const massKg = start.rocket.massKg;
-  const initialRelativeKineticJ = 0.5 * massKg * dot3(relativeVelocity(start), relativeVelocity(start));
-  const finalRelativeKineticJ = 0.5 * end.rocket.massKg * dot3(relativeVelocity(end), relativeVelocity(end));
-  const gravitationalReleaseJ = Math.max(
-    0,
-    massKg * run.config.environment.gravityMps2 * (relativeAltitude(start) - relativeAltitude(end))
+  const translationalDeltaJ =
+    ledger.finalTranslationalKineticJ - ledger.initialTranslationalKineticJ;
+  const forceWorkJ =
+    ledger.gravityWorkJ + ledger.thrustWorkJ + ledger.aerodynamicWorkJ +
+    ledger.contactWorkOnRocketJ;
+  const translationalWorkResidualJ = translationalDeltaJ - forceWorkJ;
+  const normalizedTranslationalResidual = normalizedResidual(
+    translationalWorkResidualJ,
+    translationalDeltaJ,
+    forceWorkJ,
+    ledger.initialTranslationalKineticJ
   );
 
-  let contactWorkProxyJ = 0;
-  for (let index = Math.max(1, contactIndex); index < run.frames.length; index += 1) {
-    const previous = run.frames[index - 1]!;
-    const current = run.frames[index]!;
-    const dtS = current.timeS - previous.timeS;
-    if (dtS <= 0) continue;
-    const previousPower = -dot3(previous.net.totalContactForceN, relativeVelocity(previous));
-    const currentPower = -dot3(current.net.totalContactForceN, relativeVelocity(current));
-    contactWorkProxyJ += (previousPower + currentPower) * 0.5 * dtS;
-  }
+  const rotationalDeltaJ = ledger.finalRotationalKineticJ - ledger.initialRotationalKineticJ;
+  const rotationalWorkResidualJ = rotationalDeltaJ - ledger.controlTorqueWorkJ;
+  const normalizedRotationalResidual = normalizedResidual(
+    rotationalWorkResidualJ,
+    rotationalDeltaJ,
+    ledger.controlTorqueWorkJ,
+    ledger.initialRotationalKineticJ,
+    1_000
+  );
 
-  contactWorkProxyJ = Math.max(0, contactWorkProxyJ);
-  const finalElasticProxyJ = 0.5 * run.config.net.totalStiffnessNpm * end.net.payoutM ** 2;
-  // The signed contact work contains both recoverable spring storage and
-  // irreversible damping. Subtracting the final elastic proxy avoids counting
-  // the stored spring term twice in the ledger.
-  const contactDissipationProxyJ = Math.max(0, contactWorkProxyJ - finalElasticProxyJ);
-  const availableJ = initialRelativeKineticJ + gravitationalReleaseJ;
-  const accountedJ = finalRelativeKineticJ + contactDissipationProxyJ + finalElasticProxyJ;
-  const unobservedResidualJ = availableJ - accountedJ;
-  const normalizedResidual = Math.abs(unobservedResidualJ) / Math.max(availableJ, 1);
-  const quality: ValidationQuality = normalizedResidual <= 0.15
+  const potentialDeltaJ =
+    ledger.finalGravitationalPotentialJ - ledger.initialGravitationalPotentialJ;
+  const gravityPotentialResidualJ = potentialDeltaJ + ledger.gravityWorkJ;
+  const normalizedGravityPotentialResidual = normalizedResidual(
+    gravityPotentialResidualJ,
+    potentialDeltaJ,
+    ledger.gravityWorkJ
+  );
+
+  const elasticDeltaJ = ledger.finalElasticStorageJ - ledger.initialElasticStorageJ;
+  const contactPartitionResidualJ = ledger.relativeContactWorkExtractedJ -
+    ledger.contactDampingDissipationJ - elasticDeltaJ;
+  const normalizedContactPartitionResidual = normalizedResidual(
+    contactPartitionResidualJ,
+    ledger.relativeContactWorkExtractedJ,
+    ledger.contactDampingDissipationJ,
+    elasticDeltaJ,
+    ledger.initialRelativeKineticJ
+  );
+
+  const maximumNormalizedResidual = Math.max(
+    normalizedTranslationalResidual,
+    normalizedRotationalResidual,
+    normalizedGravityPotentialResidual,
+    normalizedContactPartitionResidual
+  );
+  const quality: ValidationQuality = maximumNormalizedResidual <= 0.05
     ? "good"
-    : normalizedResidual <= 0.35 ? "caution" : "poor";
+    : maximumNormalizedResidual <= 0.15 ? "caution" : "poor";
 
   return {
     contactDetected: true,
-    startTimeS: start.timeS,
-    endTimeS: end.timeS,
-    initialRelativeKineticJ,
-    finalRelativeKineticJ,
-    gravitationalReleaseJ,
-    contactWorkProxyJ,
-    contactDissipationProxyJ,
-    finalElasticProxyJ,
-    unobservedResidualJ,
-    normalizedResidual,
+    startTimeS: ledger.startTimeS,
+    endTimeS: ledger.endTimeS,
+    physicsStepCount: ledger.physicsStepCount,
+    initialRelativeKineticJ: ledger.initialRelativeKineticJ,
+    finalRelativeKineticJ: ledger.finalRelativeKineticJ,
+    gravitationalReleaseJ: Math.max(
+      0,
+      ledger.initialGravitationalPotentialJ - ledger.finalGravitationalPotentialJ
+    ),
+    contactWorkProxyJ: ledger.relativeContactWorkExtractedJ,
+    contactDissipationProxyJ: ledger.contactDampingDissipationJ,
+    initialElasticProxyJ: ledger.initialElasticStorageJ,
+    finalElasticProxyJ: ledger.finalElasticStorageJ,
+    thrustWorkJ: ledger.thrustWorkJ,
+    aerodynamicWorkJ: ledger.aerodynamicWorkJ,
+    platformBoundaryWorkJ: ledger.platformBoundaryWorkJ,
+    translationalWorkResidualJ,
+    normalizedTranslationalResidual,
+    rotationalWorkResidualJ,
+    normalizedRotationalResidual,
+    gravityPotentialResidualJ,
+    normalizedGravityPotentialResidual,
+    contactPartitionResidualJ,
+    normalizedContactPartitionResidual,
+    unobservedResidualJ: contactPartitionResidualJ,
+    normalizedResidual: maximumNormalizedResidual,
     quality,
     interpretation: quality === "good"
-      ? "接触阶段代理能量账本残差低于 15%；仍不等同于结构能量守恒认证。"
+      ? "物理 tick 级平动、转动、重力势能与接触分区账本的最大归一残差低于 5%；仍不等同于结构认证。"
       : quality === "caution"
-        ? "代理账本存在 15%–35% 未观测残差，需关注气动、转动与离散化项。"
-        : "代理账本残差超过 35%；当前结果只能用于定性闭环演示。"
+        ? "物理 tick 账本最大归一残差为 5%–15%，可用于代理模型诊断但不宜外推。"
+        : "至少一个物理 tick 能量闭合项残差超过 15%；当前定量结果需先排查模型或离散化。"
   };
 };
 
@@ -262,8 +349,8 @@ export const runValidationSuite = (
   options: ValidationSuiteOptions = {}
 ): ValidationSuiteResult => {
   const convergence = runStepConvergenceStudy(config, options.onProgress);
-  const energyRun = runSimulation(config, { frameRateHz: 100, stopOnTerminal: true });
-  options.onProgress?.({ completed: 4, total: 4, label: "能量账本完成" });
+  const energyRun = runSimulation(config, { frameRateHz: 2, stopOnTerminal: true });
+  options.onProgress?.({ completed: 4, total: 4, label: "物理 tick 能量账本完成" });
   return {
     modelNotice: "验证结果仅适用于当前公开机理代理模型，不构成真实型号验证。",
     convergence,

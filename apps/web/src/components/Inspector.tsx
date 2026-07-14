@@ -1,4 +1,5 @@
 import { useMemo, useRef, useState } from "react";
+import { buildParameterTraceability } from "@recovery/sim-core";
 import type {
   AlgorithmMode,
   NetworkStats,
@@ -653,10 +654,10 @@ function ExperimentInspector({
       </section>
 
       <section className="inspector-section">
-        <div className="inspector-heading"><div><h2>数值验证</h2><p>用 Δt、Δt/2、Δt/4 检查步长收敛，并建立接触阶段代理能量账本。</p></div></div>
+        <div className="inspector-heading"><div><h2>数值验证</h2><p>关闭随机项后用 Δt、Δt/2、Δt/4 比较同一物理终止时刻，并检查物理 tick 能量账本。</p></div></div>
         <button className="wide-action" type="button" disabled={busy || (taskBusy && activeTask !== "validation") || onRunValidation === undefined} onClick={() => activeTask === "validation" ? onCancelTask?.() : onRunValidation?.()}>{activeTask === "validation" ? <Square size={15} fill="currentColor" /> : <PlayCircle size={17} />}{activeTask === "validation" ? "取消验证" : "运行收敛与能量验证"}</button>
         {activeTask === "validation" && taskProgress !== null ? <ProgressBlock progress={taskProgress} onCancel={onCancelTask} /> : null}
-        {validationResult === null ? <div className="inline-empty">尚未运行数值验证</div> : <div className="validation-results"><article className={`quality-card quality-${validationResult.convergence.quality}`}><div><strong>步长收敛</strong><span>{qualityLabel(validationResult.convergence.quality)}</span></div><p>{validationResult.convergence.interpretation}</p>{validationResult.convergence.comparisons.map((comparison) => <small key={comparison.fineDtS}>{comparison.coarseDtS.toFixed(4)} → {comparison.fineDtS.toFixed(4)} s：最大归一差 {(comparison.maximumNormalizedDifference * 100).toFixed(2)}%，终态{comparison.categoricalAgreement ? "一致" : "不一致"}</small>)}</article><article className={`quality-card quality-${validationResult.energy.quality}`}><div><strong>接触能量账本</strong><span>{qualityLabel(validationResult.energy.quality)}</span></div><p>{validationResult.energy.interpretation}</p><small>未观测残差 {(validationResult.energy.normalizedResidual * 100).toFixed(1)}% · 接触净做功代理 {(validationResult.energy.contactWorkProxyJ / 1e6).toFixed(2)} MJ · 阻尼耗散代理 {(validationResult.energy.contactDissipationProxyJ / 1e6).toFixed(2)} MJ · 弹性能代理 {(validationResult.energy.finalElasticProxyJ / 1e6).toFixed(2)} MJ</small></article></div>}
+        {validationResult === null ? <div className="inline-empty">尚未运行数值验证</div> : <div className="validation-results"><article className={`quality-card quality-${validationResult.convergence.quality}`}><div><strong>步长收敛</strong><span>{qualityLabel(validationResult.convergence.quality)}</span></div><p>{validationResult.convergence.interpretation}</p>{validationResult.convergence.comparisons.map((comparison) => <small key={comparison.fineDtS}>{comparison.coarseDtS.toFixed(4)} → {comparison.fineDtS.toFixed(4)} s：最大归一差 {(comparison.maximumNormalizedDifference * 100).toFixed(2)}%，终态{comparison.categoricalAgreement ? "一致" : "不一致"}</small>)}</article><article className={`quality-card quality-${validationResult.energy.quality}`}><div><strong>接触能量账本</strong><span>{qualityLabel(validationResult.energy.quality)}</span></div><p>{validationResult.energy.interpretation}</p><small>最大闭合残差 {(validationResult.energy.normalizedResidual * 100).toFixed(1)}% · 平动 {(validationResult.energy.normalizedTranslationalResidual * 100).toFixed(1)}% · 转动 {(validationResult.energy.normalizedRotationalResidual * 100).toFixed(1)}% · 接触分区 {(validationResult.energy.normalizedContactPartitionResidual * 100).toFixed(1)}% · {validationResult.energy.physicsStepCount} 个物理 tick</small></article></div>}
       </section>
 
       <section className="inspector-section"><div className="inspector-heading"><div><h2>事件证据</h2><p>最近的状态切换、接触与故障启停事件。</p></div></div>{run === null || run.events.length === 0 ? <div className="inline-empty">暂无事件</div> : <ol className="event-list">{run.events.slice(-12).map((event, index) => <li key={`${event.tick}-${event.type}-${index}`} className={`event-${event.severity}`}><time>{(event.tick * run.config.physicsDtS).toFixed(2)} s</time><span><strong>{event.type}</strong>{event.message}</span></li>)}</ol>}</section>
@@ -673,17 +674,21 @@ function EvidenceInspector({
   activeTask,
   taskProgress
 }: Pick<InspectorProps, "config" | "busy" | "onRunSensitivity" | "onCancelTask" | "traceabilityResult" | "activeTask" | "taskProgress">) {
+  const rows = useMemo(
+    () => traceabilityResult?.rows ?? buildParameterTraceability(config),
+    [config, traceabilityResult]
+  );
   return (
     <div className="inspector-scroll">
       <section className="inspector-section">
-        <div className="inspector-heading"><div><h2>参数—证据—敏感性</h2><p>参数来源来自场景元数据；敏感性是在当前 seed 附近做单因素正向扰动得到。</p></div></div>
+        <div className="inspector-heading"><div><h2>参数—证据—敏感性</h2><p>参数来源来自场景元数据；敏感性采用同 seed 的上下双侧扰动，并单独标识终态模式边界。</p></div></div>
         <button className="wide-action" type="button" disabled={busy || (activeTask !== null && activeTask !== "sensitivity") || onRunSensitivity === undefined} onClick={() => activeTask === "sensitivity" ? onCancelTask?.() : onRunSensitivity?.()}>{activeTask === "sensitivity" ? <Square size={15} fill="currentColor" /> : <PlayCircle size={17} />}{activeTask === "sensitivity" ? "取消敏感性计算" : "计算局部敏感性"}</button>
         {activeTask === "sensitivity" && taskProgress !== null ? <ProgressBlock progress={taskProgress} onCancel={onCancelTask} /> : null}
         {traceabilityResult === null ? <div className="inline-empty"><strong>证据表已内置</strong><span>点击计算后追加模型内局部敏感性分级</span></div> : <p className="reproducibility-note">{traceabilityResult.notice}</p>}
       </section>
       <section className="inspector-section traceability-section">
         <div className="traceability-table" role="table" aria-label="参数证据敏感性追溯表">
-          {(traceabilityResult?.rows ?? Object.entries(config.parameterSources).slice(0, 10).map(([path, source]) => ({ path, label: path, value: Number.NaN, unit: "", source, perturbationPercent: 0, sensitivityScore: null, sensitivityLevel: null, dominantEffect: null, dominantEffectChangePercent: null }))).map((row) => <article className="traceability-row" key={row.path}><div className="traceability-row-head"><strong>{row.label}</strong><SourceTag source={row.source} /></div><code>{row.path}</code><div className="traceability-value"><span>{Number.isFinite(row.value) ? `${row.value.toLocaleString("zh-CN", { maximumFractionDigits: 4 })} ${row.unit}` : "当前场景来源条目"}</span><span>{row.sensitivityLevel === null ? "敏感性待计算" : <b className={`sensitivity-${row.sensitivityLevel}`}>{row.sensitivityLevel === "high" ? "高" : row.sensitivityLevel === "medium" ? "中" : "低"} · 系数 {(row.sensitivityScore ?? 0).toFixed(2)}</b>}</span></div><p><strong>证据：</strong>{row.source.source}。{row.source.note}</p>{row.dominantEffect === null ? null : <small>参数幅值 +{row.perturbationPercent}% 时，主导指标“{row.dominantEffect}”变化 {(row.dominantEffectChangePercent ?? 0).toFixed(1)}%</small>}</article>)}
+          {rows.map((row) => <article className="traceability-row" key={row.path}><div className="traceability-row-head"><strong>{row.label}</strong><SourceTag source={row.source} /></div><code>{row.path}</code><div className="traceability-value"><span>{`${row.value.toLocaleString("zh-CN", { maximumFractionDigits: 4 })} ${row.unit}`}</span><span>{row.modeTransition ? <b className="sensitivity-boundary">模式边界</b> : row.sensitivityLevel === null ? "敏感性待计算" : <b className={`sensitivity-${row.sensitivityLevel}`}>{row.sensitivityLevel === "high" ? "高" : row.sensitivityLevel === "medium" ? "中" : "低"} · 系数 {(row.sensitivityScore ?? 0).toFixed(2)}</b>}</span></div><p><strong>证据：</strong>{row.source.source}。{row.source.note}</p>{row.modeTransition ? <small>双侧扰动导致终态类别变化：{row.lowerOutcome} ← {row.baselineOutcome} → {row.upperOutcome}；连续敏感性系数无效。</small> : row.dominantEffect === null ? null : <small>{row.perturbationMode === "relative" ? `双侧 ±${row.perturbationPercent}%` : `双侧绝对扰动 ±${row.perturbationAbsolute.toPrecision(3)} ${row.unit}`} 时，主导指标“{row.dominantEffect}”最大变化 {(row.dominantEffectChangePercent ?? 0).toFixed(1)}%</small>}</article>)}
         </div>
       </section>
     </div>
