@@ -1,0 +1,202 @@
++  validationResult: ValidationSuiteResult | null;
++  traceabilityResult: ParameterTraceabilityResult | null;
++  activeTask: TaskProgress["task"] | null;
++  taskProgress: TaskProgress | null;
+ }
+ 
+ interface ParameterControlProps {
+@@ -304,12 +327,44 @@ function LinkSummary({ name, stats, tone }: { name: string; stats: NetworkStats
+   );
+ }
+ 
++function FaultSwitch({
++  title,
++  detail,
++  enabled,
++  disabled,
++  onChange
++}: {
++  title: string;
++  detail: string;
++  enabled: boolean;
++  disabled: boolean;
++  onChange: (enabled: boolean) => void;
++}) {
++  return (
++    <label className={enabled ? "fault-switch is-enabled" : "fault-switch"}>
++      <span><strong>{title}</strong><small>{detail}</small></span>
++      <input
++        type="checkbox"
++        checked={enabled}
++        disabled={disabled}
++        onChange={(event) => onChange(event.currentTarget.checked)}
++      />
++    </label>
++  );
++}
++
+ function CommunicationsInspector({
+   frame,
+   config,
+   busy,
+-  onParameterChange
+-}: Pick<InspectorProps, "frame" | "config" | "busy" | "onParameterChange">) {
++  onParameterChange,
++  onFaultConfigChange
++}: Pick<InspectorProps, "frame" | "config" | "busy" | "onParameterChange" | "onFaultConfigChange">) {
++  const updateFaults = (mutate: (faults: ScenarioFaultConfig) => void) => {
++    const faults = structuredClone(config.faults);
++    mutate(faults);
++    onFaultConfigChange(faults);
++  };
+   return (
+     <div className="inspector-scroll">
+       <section className="inspector-section">
+@@ -324,85 +379,50 @@ function CommunicationsInspector({
+       </section>
+ 
+       <section className="inspector-section">
+-        <div className="inspector-heading">
+-          <div>
+-            <h2>故障注入</h2>
+-            <p>参数变化由上层重跑场景后才会反映到统计。</p>
+-          </div>
+-        </div>
++        <div className="inspector-heading"><div><h2>链路随机故障</h2><p>概率参数在每次重跑时按同一 seed 确定性复现。</p></div></div>
+         <h3 className="subsection-label">无线代理链路</h3>
+-        <ParameterControl
+-          path="radio.baseLatencyMs"
+-          label="基础时延"
+-          unit="ms"
+-          rawValue={config.radio.baseLatencyMs}
+-          min={0}
+-          max={400}
+-          step={5}
+-          source={config.parameterSources.radio}
+-          disabled={busy}
+-          onChange={onParameterChange}
+-        />
+-        <ParameterControl
+-          path="radio.jitterMs"
+-          label="时延抖动"
+-          unit="ms"
+-          rawValue={config.radio.jitterMs}
+-          min={0}
+-          max={180}
+-          step={2}
+-          disabled={busy}
+-          onChange={onParameterChange}
+-        />
+-        <ParameterControl
+-          path="radio.lossRate"
+-          label="丢包率"
+-          unit="%"
+-          rawValue={config.radio.lossRate}
+-          min={0}
+-          max={60}
+-          step={0.5}
+-          toDisplay={(value) => value * 100}
+-          fromDisplay={(value) => value / 100}
+-          disabled={busy}
+-          onChange={onParameterChange}
+-        />
++        <ParameterControl path="radio.baseLatencyMs" label="基础时延" unit="ms" rawValue={config.radio.baseLatencyMs} min={0} max={400} step={5} source={config.parameterSources.radio} disabled={busy} onChange={onParameterChange} />
++        <ParameterControl path="radio.jitterMs" label="时延抖动" unit="ms" rawValue={config.radio.jitterMs} min={0} max={180} step={2} disabled={busy} onChange={onParameterChange} />
++        <ParameterControl path="radio.lossRate" label="丢包率" unit="%" rawValue={config.radio.lossRate} min={0} max={60} step={0.5} toDisplay={(value) => value * 100} fromDisplay={(value) => value / 100} disabled={busy} onChange={onParameterChange} />
++        <ParameterControl path="radio.duplicateRate" label="重复包率" unit="%" rawValue={config.radio.duplicateRate} min={0} max={20} step={0.1} toDisplay={(value) => value * 100} fromDisplay={(value) => value / 100} disabled={busy} onChange={onParameterChange} />
++        <ParameterControl path="radio.corruptionRate" label="CRC 损坏率" unit="%" rawValue={config.radio.corruptionRate} min={0} max={10} step={0.1} toDisplay={(value) => value * 100} fromDisplay={(value) => value / 100} disabled={busy} onChange={onParameterChange} />
+         <h3 className="subsection-label">现场总线代理</h3>
+-        <ParameterControl
+-          path="fieldbus.baseLatencyMs"
+-          label="基础时延"
+-          unit="ms"
+-          rawValue={config.fieldbus.baseLatencyMs}
+-          min={0}
+-          max={40}
+-          step={0.5}
+-          disabled={busy}
+-          onChange={onParameterChange}
+-        />
+-        <ParameterControl
+-          path="fieldbus.jitterMs"
+-          label="时延抖动"
+-          unit="ms"
+-          rawValue={config.fieldbus.jitterMs}
+-          min={0}
+-          max={20}
+-          step={0.5}
+-          disabled={busy}
+-          onChange={onParameterChange}
+-        />
+-        <ParameterControl
+-          path="fieldbus.lossRate"
+-          label="丢包率"
+-          unit="%"
+-          rawValue={config.fieldbus.lossRate}
+-          min={0}
+-          max={15}
+-          step={0.1}
+-          toDisplay={(value) => value * 100}
+-          fromDisplay={(value) => value / 100}
+-          disabled={busy}
+-          onChange={onParameterChange}
+-        />
++        <ParameterControl path="fieldbus.baseLatencyMs" label="基础时延" unit="ms" rawValue={config.fieldbus.baseLatencyMs} min={0} max={40} step={0.5} disabled={busy} onChange={onParameterChange} />
++        <ParameterControl path="fieldbus.jitterMs" label="时延抖动" unit="ms" rawValue={config.fieldbus.jitterMs} min={0} max={20} step={0.5} disabled={busy} onChange={onParameterChange} />
++        <ParameterControl path="fieldbus.lossRate" label="丢包率" unit="%" rawValue={config.fieldbus.lossRate} min={0} max={15} step={0.1} toDisplay={(value) => value * 100} fromDisplay={(value) => value / 100} disabled={busy} onChange={onParameterChange} />
++        <ParameterControl path="fieldbus.duplicateRate" label="重复包率" unit="%" rawValue={config.fieldbus.duplicateRate} min={0} max={10} step={0.1} toDisplay={(value) => value * 100} fromDisplay={(value) => value / 100} disabled={busy} onChange={onParameterChange} />
++        <ParameterControl path="fieldbus.corruptionRate" label="CRC 损坏率" unit="%" rawValue={config.fieldbus.corruptionRate} min={0} max={5} step={0.05} toDisplay={(value) => value * 100} fromDisplay={(value) => value / 100} disabled={busy} onChange={onParameterChange} />
++      </section>
++
++      <section className="inspector-section">
++        <div className="inspector-heading"><div><h2>定时故障计划</h2><p>所有故障均写入场景配置和事件日志；默认关闭。</p></div></div>
++        <div className="fault-plan-list">
++          <article className="fault-plan-card">
++            <FaultSwitch title="无线静默窗口" detail="窗口内抑制箭地双向发包" enabled={config.faults.radioBlackout.enabled} disabled={busy} onChange={(enabled) => updateFaults((faults) => { faults.radioBlackout.enabled = enabled; })} />
++            <ParameterControl path="faults.radioBlackout.startTimeS" label="开始时刻" unit="s" rawValue={config.faults.radioBlackout.startTimeS} min={0} max={config.durationS} step={0.1} disabled={busy} onChange={onParameterChange} />
++            <ParameterControl path="faults.radioBlackout.durationS" label="持续时间" unit="s" rawValue={config.faults.radioBlackout.durationS} min={0.1} max={10} step={0.1} disabled={busy} onChange={onParameterChange} />
++          </article>
++          <article className="fault-plan-card">
++            <FaultSwitch title="单绞盘卡滞" detail="指定轴在窗口内保持当前位置" enabled={config.faults.winchStuck.enabled} disabled={busy} onChange={(enabled) => updateFaults((faults) => { faults.winchStuck.enabled = enabled; })} />
++            <label className="fault-select"><span>故障节点</span><select value={config.faults.winchStuck.node} disabled={busy} onChange={(event) => updateFaults((faults) => { faults.winchStuck.node = event.currentTarget.value as WinchNodeId; })}><option value="winch-x-negative">X− 绞盘</option><option value="winch-x-positive">X+ 绞盘</option><option value="winch-y-negative">Y− 绞盘</option><option value="winch-y-positive">Y+ 绞盘</option></select></label>
++            <ParameterControl path="faults.winchStuck.startTimeS" label="开始时刻" unit="s" rawValue={config.faults.winchStuck.startTimeS} min={0} max={config.durationS} step={0.1} disabled={busy} onChange={onParameterChange} />
++            <ParameterControl path="faults.winchStuck.durationS" label="持续时间" unit="s" rawValue={config.faults.winchStuck.durationS} min={0.1} max={15} step={0.1} disabled={busy} onChange={onParameterChange} />
++          </article>
++          <article className="fault-plan-card">
++            <FaultSwitch title="导航偏置阶跃" detail="箭上位置解算叠加可控偏置" enabled={config.faults.sensorBiasStep.enabled} disabled={busy} onChange={(enabled) => updateFaults((faults) => { faults.sensorBiasStep.enabled = enabled; })} />
++            <ParameterControl path="faults.sensorBiasStep.startTimeS" label="开始时刻" unit="s" rawValue={config.faults.sensorBiasStep.startTimeS} min={0} max={config.durationS} step={0.1} disabled={busy} onChange={onParameterChange} />
++            <ParameterControl path="faults.sensorBiasStep.durationS" label="持续时间" unit="s" rawValue={config.faults.sensorBiasStep.durationS} min={0.1} max={15} step={0.1} disabled={busy} onChange={onParameterChange} />
++            <ParameterControl path="faults.sensorBiasStep.deltaM.0" label="X 偏置" unit="m" rawValue={config.faults.sensorBiasStep.deltaM[0]} min={-5} max={5} step={0.1} disabled={busy} onChange={onParameterChange} />
++            <ParameterControl path="faults.sensorBiasStep.deltaM.1" label="Y 偏置" unit="m" rawValue={config.faults.sensorBiasStep.deltaM[1]} min={-5} max={5} step={0.1} disabled={busy} onChange={onParameterChange} />
++            <ParameterControl path="faults.sensorBiasStep.deltaM.2" label="Z 偏置" unit="m" rawValue={config.faults.sensorBiasStep.deltaM[2]} min={-5} max={5} step={0.1} disabled={busy} onChange={onParameterChange} />
++          </article>
++          <article className="fault-plan-card">
++            <FaultSwitch title="推力降额" detail="窗口内按比例缩放控制器推力指令" enabled={config.faults.thrustScale.enabled} disabled={busy} onChange={(enabled) => updateFaults((faults) => { faults.thrustScale.enabled = enabled; })} />
++            <ParameterControl path="faults.thrustScale.startTimeS" label="开始时刻" unit="s" rawValue={config.faults.thrustScale.startTimeS} min={0} max={config.durationS} step={0.1} disabled={busy} onChange={onParameterChange} />
++            <ParameterControl path="faults.thrustScale.durationS" label="持续时间" unit="s" rawValue={config.faults.thrustScale.durationS} min={0.1} max={15} step={0.1} disabled={busy} onChange={onParameterChange} />
++            <ParameterControl path="faults.thrustScale.scale" label="剩余推力" unit="%" rawValue={config.faults.thrustScale.scale} min={0} max={100} step={1} toDisplay={(value) => value * 100} fromDisplay={(value) => value / 100} disabled={busy} onChange={onParameterChange} />
++          </article>
++        </div>
+       </section>
+     </div>
+   );
+@@ -554,123 +574,127 @@ function OutcomeBadge({ run }: { run: SimulationRun }) {
+   return <span className="outcome-badge"><CircleGauge size={16} />未发生捕获</span>;
+ }
+ 
++function ProgressBlock({ progress, onCancel }: { progress: TaskProgress; onCancel?: (() => void) | undefined }) {
++  const percent = progress.total <= 0 ? 0 : Math.min(100, progress.completed / progress.total * 100);
++  return (
++    <div className="task-progress" role="status" aria-live="polite">
++      <div><strong>{progress.label}</strong><span>{progress.completed}/{progress.total}</span></div>
++      <div className="task-progress-track"><i style={{ width: `${percent}%` }} /></div>
++      {onCancel === undefined ? null : <button type="button" onClick={onCancel}><Square size={13} fill="currentColor" />取消</button>}
++    </div>
++  );
++}
++
++const qualityLabel = (quality: "good" | "caution" | "poor"): string =>
++  quality === "good" ? "收敛良好" : quality === "caution" ? "需要谨慎" : "不满足定量使用";
++
+ function ExperimentInspector({
+   run,
