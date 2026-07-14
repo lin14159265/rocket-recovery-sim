@@ -1,1 +1,1 @@
-确认 v0.3.1 GitHub Pages 站点是否已从 building 转为 built。
+触发 v0.3.1 GitHub Pages 首页、JavaScript 与 CSS 公网 HTTP 验收。
