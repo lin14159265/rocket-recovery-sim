@@ -1,0 +1,513 @@
++  background: rgba(112, 24, 38, 0.22);
++}
++
++.inline-warning {
++  margin-bottom: 9px;
++  padding: 8px 9px;
++  border: 1px solid rgba(255, 112, 76, 0.38);
++  border-radius: 4px;
++  color: #e9b29f;
++  background: rgba(92, 40, 25, 0.18);
++  font-size: 8.5px;
++  line-height: 1.5;
++}
++
++/* v0.3.0 experiment, fault and evidence surfaces */
++.inspector-tabs {
++  grid-template-columns: repeat(5, minmax(0, 1fr));
++}
++
++.inspector-tabs button {
++  gap: 4px;
++  font-size: 9px;
++}
++
++.fault-plan-list,
++.validation-results,
++.traceability-table {
++  display: grid;
++  gap: 8px;
++}
++
++.fault-plan-card,
++.quality-card,
++.traceability-row,
++.task-progress {
++  padding: 10px;
++  border: 1px solid #273e52;
++  border-radius: 5px;
++  background: rgba(8, 22, 33, 0.72);
++}
++
++.fault-switch {
++  display: flex;
++  align-items: center;
++  justify-content: space-between;
++  gap: 10px;
++  margin-bottom: 8px;
++  color: #9cb0c1;
++}
++
++.fault-switch span {
++  display: grid;
++  gap: 3px;
++}
++
++.fault-switch strong {
++  color: #c6d7e5;
++  font-size: 10px;
++}
++
++.fault-switch small {
++  color: #6f8497;
++  font-size: 8px;
++  line-height: 1.4;
++}
++
++.fault-switch.is-enabled strong {
++  color: #ffb08f;
++}
++
++.fault-switch input {
++  width: 34px;
++  height: 18px;
++  accent-color: #ef6c43;
++}
++
++.fault-select {
++  display: grid;
++  grid-template-columns: minmax(0, 1fr) 122px;
++  align-items: center;
++  gap: 8px;
++  margin: 7px 0 9px;
++  color: #8da2b4;
++  font-size: 9px;
++}
++
++.fault-select select {
++  height: 30px;
++  border: 1px solid #2e465a;
++  border-radius: 4px;
++  color: #cfe0eb;
++  background: #0a1722;
++  font-size: 9px;
++}
++
++.export-actions--three {
++  grid-template-columns: repeat(3, minmax(0, 1fr));
++}
++
++.inline-notice {
++  margin-top: 8px;
++  padding: 8px 9px;
++  border: 1px solid rgba(69, 179, 232, 0.38);
++  border-radius: 4px;
++  color: #a9d8ef;
++  background: rgba(26, 83, 112, 0.15);
++  font-size: 8.5px;
++  line-height: 1.5;
++}
++
++.wide-action {
++  display: inline-flex;
++  align-items: center;
++  justify-content: center;
++  gap: 7px;
++  width: 100%;
++  min-height: 36px;
++  border: 1px solid #31516a;
++  border-radius: 4px;
++  color: #b9dff5;
++  background: rgba(31, 100, 143, 0.12);
++  font-size: 9px;
++  font-weight: 650;
++  cursor: pointer;
++}
++
++.wide-action:hover:not(:disabled) {
++  border-color: #48a7e5;
++  color: #eff9ff;
++}
++
++.task-progress {
++  display: grid;
++  grid-template-columns: minmax(0, 1fr) auto;
++  gap: 7px 9px;
++  margin-top: 8px;
++}
++
++.task-progress > div:first-child {
++  display: flex;
++  justify-content: space-between;
++  gap: 12px;
++  grid-column: 1 / -1;
++  color: #9fb4c5;
++  font-size: 8.5px;
++}
++
++.task-progress-track {
++  height: 6px;
++  overflow: hidden;
++  border-radius: 999px;
++  background: #142738;
++}
++
++.task-progress-track i {
++  display: block;
++  height: 100%;
++  border-radius: inherit;
++  background: linear-gradient(90deg, #2b96cd, #4dd5ac);
++  transition: width 180ms ease;
++}
++
++.task-progress button {
++  display: inline-flex;
++  align-items: center;
++  gap: 4px;
++  padding: 0;
++  border: 0;
++  color: #ef9ca8;
++  background: transparent;
++  font-size: 8px;
++  cursor: pointer;
++}
++
++.quality-card > div,
++.traceability-row-head,
++.traceability-value {
++  display: flex;
++  align-items: center;
++  justify-content: space-between;
++  gap: 8px;
++}
++
++.quality-card > div strong {
++  color: #dce9f2;
++  font-size: 10px;
++}
++
++.quality-card > div span {
++  font-size: 8px;
++  font-weight: 700;
++}
++
++.quality-card p,
++.traceability-row p {
++  margin: 7px 0;
++  color: #879bad;
++  font-size: 8.5px;
++  line-height: 1.55;
++}
++
++.quality-card small,
++.traceability-row small {
++  display: block;
++  margin-top: 4px;
++  color: #6f8395;
++  font-size: 7.8px;
++  line-height: 1.5;
++}
++
++.quality-good { border-color: rgba(70, 201, 150, 0.38); }
++.quality-good > div span { color: #62d9ac; }
++.quality-caution { border-color: rgba(231, 176, 72, 0.4); }
++.quality-caution > div span { color: #e5b85c; }
++.quality-poor { border-color: rgba(232, 91, 110, 0.45); }
++.quality-poor > div span { color: #f18a9a; }
++
++.traceability-section {
++  padding-top: 10px;
++}
++
++.traceability-row-head strong {
++  color: #dce9f2;
++  font-size: 10px;
++}
++
++.traceability-row code {
++  display: block;
++  margin-top: 4px;
++  overflow-wrap: anywhere;
++  color: #5d92ae;
++  font-size: 7.5px;
++}
++
++.traceability-value {
++  margin-top: 8px;
++  color: #9fb1c0;
++  font-size: 8.5px;
++}
++
++.traceability-value b {
++  font-weight: 750;
++}
++
++.sensitivity-high { color: #f18491; }
++.sensitivity-medium { color: #e6ba65; }
++.sensitivity-low { color: #68d5ac; }
++
++@media (max-width: 760px) {
++  .export-actions--three {
++    grid-template-columns: 1fr;
++  }
++
++  .inspector-tabs button span {
++    display: none;
++  }
++}
+diff --git a/apps/web/src/workers/protocol.ts b/apps/web/src/workers/protocol.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..076d3704ca9c33c3123e5b97460f8836c4545431
+--- /dev/null
++++ b/apps/web/src/workers/protocol.ts
+@@ -0,0 +1,67 @@
++import type {
++  AlgorithmComparisonResult,
++  ParameterTraceabilityResult,
++  ScenarioConfig,
++  SimulationRun,
++  ValidationSuiteResult
++} from "@recovery/sim-core";
++
++export type WorkerTask = "comparison" | "validation" | "sensitivity";
++
++export interface WorkerProgress {
++  task: WorkerTask;
++  completed: number;
++  total: number;
++  label: string;
++}
++
++export type SimulationWorkerRequest =
++  | {
++      requestId: number;
++      kind: "run";
++      config: ScenarioConfig;
++    }
++  | {
++      requestId: number;
++      kind: "comparison";
++      config: ScenarioConfig;
++      samplesPerVariant: number;
++    }
++  | {
++      requestId: number;
++      kind: "validation";
++      config: ScenarioConfig;
++    }
++  | {
++      requestId: number;
++      kind: "sensitivity";
++      config: ScenarioConfig;
++    };
++
++export type SimulationWorkerResponse =
++  | {
++      requestId: number;
++      kind: "run-result";
++      run: SimulationRun;
++    }
++  | {
++      requestId: number;
++      kind: "comparison-result";
++      result: AlgorithmComparisonResult;
++    }
++  | {
++      requestId: number;
++      kind: "validation-result";
++      result: ValidationSuiteResult;
++    }
++  | {
++      requestId: number;
++      kind: "sensitivity-result";
++      result: ParameterTraceabilityResult;
++    }
++  | ({ requestId: number; kind: "progress" } & WorkerProgress)
++  | {
++      requestId: number;
++      kind: "error";
++      message: string;
++    };
+diff --git a/apps/web/src/workers/simulation.worker.ts b/apps/web/src/workers/simulation.worker.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..58d35246878a3ce43ed3063ac57d947166e6263e
+--- /dev/null
++++ b/apps/web/src/workers/simulation.worker.ts
+@@ -0,0 +1,94 @@
++import {
++  runAlgorithmComparison,
++  runLocalSensitivity,
++  runSimulation,
++  runValidationSuite
++} from "@recovery/sim-core";
++import type {
++  SimulationWorkerRequest,
++  SimulationWorkerResponse,
++  WorkerProgress,
++  WorkerTask
++} from "./protocol";
++
++const worker = self as DedicatedWorkerGlobalScope;
++
++const postProgress = (
++  requestId: number,
++  task: WorkerTask,
++  progress: Omit<WorkerProgress, "task">
++): void => {
++  const response: SimulationWorkerResponse = {
++    requestId,
++    kind: "progress",
++    task,
++    ...progress
++  };
++  worker.postMessage(response);
++};
++
++worker.onmessage = (event: MessageEvent<SimulationWorkerRequest>) => {
++  const request = event.data;
++  try {
++    if (request.kind === "run") {
++      const response: SimulationWorkerResponse = {
++        requestId: request.requestId,
++        kind: "run-result",
++        run: runSimulation(request.config, {
++          frameRateHz: 30,
++          stopOnTerminal: false
++        })
++      };
++      worker.postMessage(response);
++      return;
++    }
++
++    if (request.kind === "comparison") {
++      const response: SimulationWorkerResponse = {
++        requestId: request.requestId,
++        kind: "comparison-result",
++        result: runAlgorithmComparison(request.config, {
++          samplesPerVariant: request.samplesPerVariant,
++          seed: request.config.seed,
++          simulationOptions: {
++            frameRateHz: 1,
++            stopOnTerminal: true
++          },
++          onProgress: (progress) => postProgress(request.requestId, "comparison", progress)
++        })
++      };
++      worker.postMessage(response);
++      return;
++    }
++
++    if (request.kind === "validation") {
++      const response: SimulationWorkerResponse = {
++        requestId: request.requestId,
++        kind: "validation-result",
++        result: runValidationSuite(request.config, {
++          onProgress: (progress) => postProgress(request.requestId, "validation", progress)
++        })
++      };
++      worker.postMessage(response);
++      return;
++    }
++
++    const response: SimulationWorkerResponse = {
++      requestId: request.requestId,
++      kind: "sensitivity-result",
++      result: runLocalSensitivity(request.config, (progress) =>
++        postProgress(request.requestId, "sensitivity", progress)
++      )
++    };
++    worker.postMessage(response);
++  } catch (error) {
++    const response: SimulationWorkerResponse = {
++      requestId: request.requestId,
++      kind: "error",
++      message: error instanceof Error ? error.message : String(error)
++    };
++    worker.postMessage(response);
++  }
++};
++
++export {};
+diff --git a/apps/web/vite.config.ts b/apps/web/vite.config.ts
+index 4c0ed25ee8b7f81846328d822895ffd05f3a35eb..339694439fbb915612fd2268e6c06bd9f9e54803 100644
+--- a/apps/web/vite.config.ts
++++ b/apps/web/vite.config.ts
+@@ -2,6 +2,7 @@ import { defineConfig } from "vite";
+ import react from "@vitejs/plugin-react";
+ 
+ export default defineConfig({
++  base: "./",
+   plugins: [react()],
+   build: {
+     target: "es2022",
+diff --git "a/docs/\345\205\254\345\274\200\350\265\204\346\226\231\344\270\216\346\250\241\345\236\213\350\276\271\347\225\214.md" "b/docs/\345\205\254\345\274\200\350\265\204\346\226\231\344\270\216\346\250\241\345\236\213\350\276\271\347\225\214.md"
+index 93702061177282c7842c103a4102f490b9df6d1b..1113fefa7af178842573bfcfea4679ba589f1398 100644
+--- "a/docs/\345\205\254\345\274\200\350\265\204\346\226\231\344\270\216\346\250\241\345\236\213\350\276\271\347\225\214.md"
++++ "b/docs/\345\205\254\345\274\200\350\265\204\346\226\231\344\270\216\346\250\241\345\236\213\350\276\271\347\225\214.md"
+@@ -4,7 +4,7 @@
+ 
+ ## 官方已确认
+ 
+-1. 2026 年 7 月 10 日 12 时 15 分，长征十号乙在海南商业航天发射场发射；一二级分离约 6 分钟后，一子级垂直返回并在海上回收平台完成网系捕获。
++1. 2026 年 7 月 10 日，长征十号乙在海南商业航天发射场首飞；一子级在分离后约 6 分钟内完成返回，并由海上回收平台的网系捕获。
+ 2. 公开机械机制是回收船的“井”字形高强度缓冲阻拦索挂住箭上挂索机构。
+ 3. 官方确认的关键能力包括高精度导航控制、复杂力热环境适应和海上平台网系捕获。
+ 4. 公开整箭尺度：全长约 63 m、直径 5 m、起飞重量约 760 t、起飞推力约 890 t；这些数字不是回收时一子级质量或终端工况。
+diff --git "a/docs/\345\217\202\346\225\260\350\257\201\346\215\256\344\270\216\346\225\217\346\204\237\346\200\247\350\277\275\346\272\257.md" "b/docs/\345\217\202\346\225\260\350\257\201\346\215\256\344\270\216\346\225\217\346\204\237\346\200\247\350\277\275\346\272\257.md"
+new file mode 100644
+index 0000000000000000000000000000000000000000..908ed7704c5b6c03af17491dfd95cad5972449b8
+--- /dev/null
++++ "b/docs/\345\217\202\346\225\260\350\257\201\346\215\256\344\270\216\346\225\217\346\204\237\346\200\247\350\277\275\346\272\257.md"
+@@ -0,0 +1,64 @@
++# 参数—证据—敏感性追溯
++
++## 追溯目标
++
++追溯表将三个问题放在同一行回答：
++
++1. 当前参数是什么；
++2. 参数依据来自哪里、可信状态是什么；
++3. 在当前场景附近，模型结果对它有多敏感。
++
++参数来源状态沿用：
++
++- `official`：公开官方信息直接支持；
++- `public-estimate`：可由公开资料估计，但不是官方参数；
++- `calibrated`：为匹配代理模型行为或演示观测而标定；
++- `assumed`：缺少公开数据时采用的研究假设。
++
++来源状态描述的是证据性质，不代表数值精度等级。
++
++## 当前敏感性方法
++
++v0.3.0 对十项关键参数进行确定性单因素局部扰动：
++
++- 等效回收质量；
++- 初始垂向速度；
++- 网系总刚度、总阻尼和代理强度上限；
++- 无线基础时延和丢包率；
++- 箭上位置噪声；
++- 网中心位置增益；
++- 遥测失效中止阈值。
++
++每次实验保持相同 seed，只改变一个参数的幅值。敏感性系数定义为：
++
++```text
++主导输出指标的相对变化 ÷ 输入参数的相对扰动
++```
++
++输出候选包括最小错位、捕获相对速度、峰值接触力、最大估计误差和稳定终态。分级规则为：
++
++- 低：系数 < 0.25；
++- 中：0.25 ≤ 系数 < 1；
++- 高：系数 ≥ 1，或离散终态变化导致同等量级的高系数。
++
++## 正确解释
++
++该结果只描述：
++
++- 当前标称点附近；
++- 当前 seed；
++- 当前代理模型和输出指标；
++- 单因素、有限幅度扰动。
++
