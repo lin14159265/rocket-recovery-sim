@@ -1,0 +1,59 @@
+name: 发布 v0.3.0
+
+on:
+  push:
+    branches:
+      - sync/v0.3.0
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出云端同步分支
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 规范化远端基线
+        run: python .sync/normalize_remote_base.py
+
+      - name: 应用 v0.3.0 完整变更
+        run: |
+          cat .sync/patch-*.txt > /tmp/v0.3.0.patch
+          git apply --check /tmp/v0.3.0.patch
+          git apply /tmp/v0.3.0.patch
+
+      - name: 安装依赖并完成质量门禁
+        run: |
+          npm ci
+          npm run typecheck
+          npm test
+          npm run build
+
+      - name: 生成中文原子版本提交并推送
+        env:
+          BASE_COMMIT: d607f830cfda32794023d19a586972c609e646da
+        run: |
+          rm -rf .sync
+          rm -f .github/workflows/publish-v0.3.0.yml
+          rmdir .github/workflows 2>/dev/null || true
+          rmdir .github 2>/dev/null || true
+          git config user.name "OpenAI Codex"
+          git config user.email "codex@openai.com"
+          git add -A
+          TREE_SHA=$(git write-tree)
+          COMMIT_MESSAGE=$(cat <<'EOF'
+          发布 v0.3.0：故障注入、数值验证与参数追溯
+
+          版本描述：将公开机理代理仿真实验台升级为可注入故障、可检查数值可信度、可迁移场景并可追溯参数证据的实验环境。
+
+          主要修改：新增无线静默、单绞盘卡滞、导航偏置阶跃和推力降额；增加批量实验逐运行进度和取消；加入 Δt/Δt/2/Δt/4 步长收敛与接触阶段代理能量账本；支持场景 JSON 导入、结构校验及 v1 到 v2 迁移；新增参数—证据—敏感性追溯表与命令行入口。
+
+          验证：TypeScript 类型检查通过；9 个测试文件、59 项测试通过；生产构建通过。
+          EOF
+          )
+          RELEASE_COMMIT=$(printf '%s\n' "$COMMIT_MESSAGE" | git commit-tree "$TREE_SHA" -p "$BASE_COMMIT")
+          git push origin "$RELEASE_COMMIT":refs/heads/versions/v0.3.0 "$RELEASE_COMMIT":refs/heads/main
