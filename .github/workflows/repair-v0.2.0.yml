@@ -1,0 +1,84 @@
+name: 修复发布 v0.2.0
+
+on:
+  push:
+    branches:
+      - sync/v0.2.0
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出云端同步分支
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 执行带诊断的发布流程
+        env:
+          BASE_COMMIT: d607f830cfda32794023d19a586972c609e646da
+        run: |
+          set +e
+          LOG=/tmp/v0.2.0-publish.log
+          : > "$LOG"
+          run_step() {
+            title="$1"
+            shift
+            printf '\n## %s\n' "$title" | tee -a "$LOG"
+            "$@" >> "$LOG" 2>&1
+            code=$?
+            printf '退出码：%s\n' "$code" | tee -a "$LOG"
+            return "$code"
+          }
+
+          run_step "规范化远端基线" python .sync/normalize_remote_base.py
+          STATUS=$?
+          if [ "$STATUS" -eq 0 ]; then
+            cat .sync/patch-*.txt > /tmp/v0.2.0.patch
+            run_step "检查补丁" git apply --check /tmp/v0.2.0.patch
+            STATUS=$?
+          fi
+          if [ "$STATUS" -eq 0 ]; then
+            run_step "应用补丁" git apply /tmp/v0.2.0.patch
+            STATUS=$?
+          fi
+          if [ "$STATUS" -eq 0 ]; then run_step "安装依赖" npm ci; STATUS=$?; fi
+          if [ "$STATUS" -eq 0 ]; then run_step "类型检查" npm run typecheck; STATUS=$?; fi
+          if [ "$STATUS" -eq 0 ]; then run_step "自动测试" npm test; STATUS=$?; fi
+          if [ "$STATUS" -eq 0 ]; then run_step "生产构建" npm run build; STATUS=$?; fi
+
+          git config user.name "OpenAI Codex"
+          git config user.email "codex@openai.com"
+
+          if [ "$STATUS" -eq 0 ]; then
+            rm -rf .sync
+            rm -f .github/workflows/publish-v0.2.0.yml .github/workflows/repair-v0.2.0.yml
+            rmdir .github/workflows 2>/dev/null || true
+            rmdir .github 2>/dev/null || true
+            git add -A
+            TREE_SHA=$(git write-tree)
+            COMMIT_MESSAGE=$(cat <<'EOF'
+            发布 v0.2.0：接管基线与完整实验闭环
+
+            版本描述：将原有仿真内核、三维场景和遥测组件连接为可运行、可解释、可重复实验的完整前端工作流，作为后续功能演进的稳定接管基线。
+
+            主要修改：接通确定性仿真、三维视图、遥测曲线和回放控制；使用 Web Worker 执行单场景与有界扰动对照；支持场景预设、参数编辑、算法切换、seed 修改及 JSON 导出；增加模型版本、配置指纹和模型边界说明；修复 SECURED 状态与物理稳定判据不同步导致的提前终止问题。
+
+            验证：TypeScript 类型检查通过；7 个测试文件、47 项测试通过；生产构建通过。
+            EOF
+            )
+            RELEASE_COMMIT=$(printf '%s\n' "$COMMIT_MESSAGE" | git commit-tree "$TREE_SHA" -p "$BASE_COMMIT")
+            git push origin "$RELEASE_COMMIT":refs/heads/versions/v0.2.0
+            exit $?
+          fi
+
+          git reset --hard HEAD
+          mkdir -p diagnostics
+          cp "$LOG" diagnostics/v0.2.0-publish.log
+          git add diagnostics/v0.2.0-publish.log
+          git commit -m "记录 v0.2.0 云端发布失败诊断"
+          git push --force origin HEAD:refs/heads/diagnostics/v0.2.0
+          exit "$STATUS"
