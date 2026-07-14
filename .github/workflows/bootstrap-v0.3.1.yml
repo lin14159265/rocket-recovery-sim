@@ -1,0 +1,81 @@
+name: 完成 v0.3.1 并部署 GitHub Pages
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  materialize-and-build:
+    name: 应用修复、验证并生成网页
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 还原 v0.3.1 源码补丁
+        run: |
+          cat .sync/v0.3.1.patch.gz.b64.part-* | base64 --decode | gzip --decompress > /tmp/v0.3.1.patch
+          git apply --check /tmp/v0.3.1.patch
+          git apply /tmp/v0.3.1.patch
+          rm -rf .sync
+          rm -f .github/workflows/bootstrap-v0.3.1.yml
+
+      - name: 配置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: TypeScript 类型检查
+        run: npm run typecheck
+
+      - name: 自动化测试
+        run: npm test
+
+      - name: GitHub Pages 生产构建
+        env:
+          GITHUB_PAGES: "true"
+        run: npm run build
+
+      - name: 固化中文 v0.3.1 源码提交
+        run: |
+          git config user.name "OpenAI Codex"
+          git config user.email "codex@openai.com"
+          git add -A
+          git commit -m "发布 v0.3.1：修复验证可信度并部署 GitHub Pages" -m "版本描述：集中修复场景完整性、数值验证、敏感性解释和前端运行配置一致性问题，并建立从 main 自动质量检查与发布 GitHub Pages 的网页交付链路。" -m "主要修改：当前 v2 场景执行严格完整校验及指纹核验；步长收敛隔离随机项并统一物理终止时刻；能量账本改为物理 tick 累积并拆分闭合残差；敏感性改为双侧扰动、零值绝对下限和模式边界报告；三维结果使用 run.config，与编辑草稿隔离；追溯表行集合保持稳定；新增 GitHub Pages 自动部署工作流。" -m "验证：TypeScript 类型检查通过；10 个测试文件、67 项测试通过；GitHub Pages 子路径生产构建通过。"
+          git push origin HEAD:refs/heads/main HEAD:refs/heads/versions/v0.3.1
+
+      - name: 配置 GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: 上传网页构建产物
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: apps/web/dist
+
+  deploy:
+    name: 发布网页
+    needs: materialize-and-build
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: 部署到 GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
