@@ -56,6 +56,8 @@ export type NodeId =
   | "winch-y-negative"
   | "winch-y-positive";
 
+export type WinchNodeId = Exclude<NodeId, "rocket" | "coordinator">;
+
 export const WINCH_IDS = [
   "winch-x-negative",
   "winch-x-positive",
@@ -181,8 +183,22 @@ export interface ControllerConfig {
   staleTelemetryAbortS: number;
 }
 
+
+export interface TimedFaultWindow {
+  enabled: boolean;
+  startTimeS: number;
+  durationS: number;
+}
+
+export interface ScenarioFaultConfig {
+  radioBlackout: TimedFaultWindow;
+  winchStuck: TimedFaultWindow & { node: WinchNodeId };
+  sensorBiasStep: TimedFaultWindow & { deltaM: Vec3 };
+  thrustScale: TimedFaultWindow & { scale: number };
+}
+
 export interface ScenarioConfig {
-  schemaVersion: 1;
+  schemaVersion: 2;
   id: string;
   name: string;
   description: string;
@@ -197,6 +213,7 @@ export interface ScenarioConfig {
   controller: ControllerConfig;
   radio: LinkConfig;
   fieldbus: LinkConfig;
+  faults: ScenarioFaultConfig;
   parameterSources: Record<string, ParameterSource>;
 }
 
@@ -364,6 +381,8 @@ export interface SimulationSnapshot {
 }
 
 export interface SimulationRun {
+  modelVersion: string;
+  configFingerprint: string;
   config: ScenarioConfig;
   frames: SimulationSnapshot[];
   telemetry: TelemetrySample[];

@@ -1,11 +1,15 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import type {
   AlgorithmMode,
   NetworkStats,
   ParameterSource,
+  ParameterTraceabilityResult,
   ScenarioConfig,
+  ScenarioFaultConfig,
   SimulationRun,
-  SimulationSnapshot
+  SimulationSnapshot,
+  ValidationSuiteResult,
+  WinchNodeId
 } from "@recovery/sim-core";
 import {
   AlertTriangle,
@@ -13,7 +17,11 @@ import {
   CircleGauge,
   Cpu,
   LoaderCircle,
+  Download,
   PlayCircle,
+  Upload,
+  RefreshCw,
+  Square,
   ShieldCheck,
   Wifi
 } from "lucide-react";
@@ -21,7 +29,8 @@ import type {
   DashboardParameterKey,
   DashboardPreset,
   InspectorTab,
-  MonteCarloSummary
+  MonteCarloSummary,
+  TaskProgress
 } from "./Dashboard";
 
 export interface InspectorProps {
@@ -30,12 +39,26 @@ export interface InspectorProps {
   frame: SimulationSnapshot | null;
   config: ScenarioConfig;
   busy: boolean;
+  dirty: boolean;
   onParameterChange: (path: DashboardParameterKey, value: number) => void;
+  onFaultConfigChange: (faults: ScenarioFaultConfig) => void;
   onAlgorithmChange: (algorithm: AlgorithmMode) => void;
   onPresetChange: (preset: DashboardPreset) => void;
+  onSeedChange: (seed: number) => void;
+  onRerun: () => void;
+  onImportScenario: (file: File) => void;
+  importNotice: string | null;
+  onExportScenario: () => void;
+  onExportRun: () => void;
   onRunMonteCarlo: ((count: number) => void) | undefined;
+  onRunValidation: (() => void) | undefined;
+  onRunSensitivity: (() => void) | undefined;
+  onCancelTask: (() => void) | undefined;
   monteCarloSummary: MonteCarloSummary | null;
-  busyMonteCarlo: boolean;
+  validationResult: ValidationSuiteResult | null;
+  traceabilityResult: ParameterTraceabilityResult | null;
+  activeTask: TaskProgress["task"] | null;
+  taskProgress: TaskProgress | null;
 }
 
 interface ParameterControlProps {
@@ -304,12 +327,44 @@ function LinkSummary({ name, stats, tone }: { name: string; stats: NetworkStats 
   );
 }
 
+function FaultSwitch({
+  title,
+  detail,
+  enabled,
+  disabled,
+  onChange
+}: {
+  title: string;
+  detail: string;
+  enabled: boolean;
+  disabled: boolean;
+  onChange: (enabled: boolean) => void;
+}) {
+  return (
+    <label className={enabled ? "fault-switch is-enabled" : "fault-switch"}>
+      <span><strong>{title}</strong><small>{detail}</small></span>
+      <input
+        type="checkbox"
+        checked={enabled}
+        disabled={disabled}
+        onChange={(event) => onChange(event.currentTarget.checked)}
+      />
+    </label>
+  );
+}
+
 function CommunicationsInspector({
   frame,
   config,
   busy,
-  onParameterChange
-}: Pick<InspectorProps, "frame" | "config" | "busy" | "onParameterChange">) {
+  onParameterChange,
+  onFaultConfigChange
+}: Pick<InspectorProps, "frame" | "config" | "busy" | "onParameterChange" | "onFaultConfigChange">) {
+  const updateFaults = (mutate: (faults: ScenarioFaultConfig) => void) => {
+    const faults = structuredClone(config.faults);
+    mutate(faults);
+    onFaultConfigChange(faults);
+  };
   return (
     <div className="inspector-scroll">
       <section className="inspector-section">
@@ -324,85 +379,50 @@ function CommunicationsInspector({
       </section>
 
       <section className="inspector-section">
-        <div className="inspector-heading">
-          <div>
-            <h2>故障注入</h2>
-            <p>参数变化由上层重跑场景后才会反映到统计。</p>
-          </div>
-        </div>
+        <div className="inspector-heading"><div><h2>链路随机故障</h2><p>概率参数在每次重跑时按同一 seed 确定性复现。</p></div></div>
         <h3 className="subsection-label">无线代理链路</h3>
-        <ParameterControl
-          path="radio.baseLatencyMs"
-          label="基础时延"
-          unit="ms"
-          rawValue={config.radio.baseLatencyMs}
-          min={0}
-          max={400}
-          step={5}
-          source={config.parameterSources.radio}
-          disabled={busy}
-          onChange={onParameterChange}
-        />
-        <ParameterControl
-          path="radio.jitterMs"
-          label="时延抖动"
-          unit="ms"
-          rawValue={config.radio.jitterMs}
-          min={0}
-          max={180}
-          step={2}
-          disabled={busy}
-          onChange={onParameterChange}
-        />
-        <ParameterControl
-          path="radio.lossRate"
-          label="丢包率"
-          unit="%"
-          rawValue={config.radio.lossRate}
-          min={0}
-          max={60}
-          step={0.5}
-          toDisplay={(value) => value * 100}
-          fromDisplay={(value) => value / 100}
-          disabled={busy}
-          onChange={onParameterChange}
-        />
+        <ParameterControl path="radio.baseLatencyMs" label="基础时延" unit="ms" rawValue={config.radio.baseLatencyMs} min={0} max={400} step={5} source={config.parameterSources.radio} disabled={busy} onChange={onParameterChange} />
+        <ParameterControl path="radio.jitterMs" label="时延抖动" unit="ms" rawValue={config.radio.jitterMs} min={0} max={180} step={2} disabled={busy} onChange={onParameterChange} />
+        <ParameterControl path="radio.lossRate" label="丢包率" unit="%" rawValue={config.radio.lossRate} min={0} max={60} step={0.5} toDisplay={(value) => value * 100} fromDisplay={(value) => value / 100} disabled={busy} onChange={onParameterChange} />
+        <ParameterControl path="radio.duplicateRate" label="重复包率" unit="%" rawValue={config.radio.duplicateRate} min={0} max={20} step={0.1} toDisplay={(value) => value * 100} fromDisplay={(value) => value / 100} disabled={busy} onChange={onParameterChange} />
+        <ParameterControl path="radio.corruptionRate" label="CRC 损坏率" unit="%" rawValue={config.radio.corruptionRate} min={0} max={10} step={0.1} toDisplay={(value) => value * 100} fromDisplay={(value) => value / 100} disabled={busy} onChange={onParameterChange} />
         <h3 className="subsection-label">现场总线代理</h3>
-        <ParameterControl
-          path="fieldbus.baseLatencyMs"
-          label="基础时延"
-          unit="ms"
-          rawValue={config.fieldbus.baseLatencyMs}
-          min={0}
-          max={40}
-          step={0.5}
-          disabled={busy}
-          onChange={onParameterChange}
-        />
-        <ParameterControl
-          path="fieldbus.jitterMs"
-          label="时延抖动"
-          unit="ms"
-          rawValue={config.fieldbus.jitterMs}
-          min={0}
-          max={20}
-          step={0.5}
-          disabled={busy}
-          onChange={onParameterChange}
-        />
-        <ParameterControl
-          path="fieldbus.lossRate"
-          label="丢包率"
-          unit="%"
-          rawValue={config.fieldbus.lossRate}
-          min={0}
-          max={15}
-          step={0.1}
-          toDisplay={(value) => value * 100}
-          fromDisplay={(value) => value / 100}
-          disabled={busy}
-          onChange={onParameterChange}
-        />
+        <ParameterControl path="fieldbus.baseLatencyMs" label="基础时延" unit="ms" rawValue={config.fieldbus.baseLatencyMs} min={0} max={40} step={0.5} disabled={busy} onChange={onParameterChange} />
+        <ParameterControl path="fieldbus.jitterMs" label="时延抖动" unit="ms" rawValue={config.fieldbus.jitterMs} min={0} max={20} step={0.5} disabled={busy} onChange={onParameterChange} />
+        <ParameterControl path="fieldbus.lossRate" label="丢包率" unit="%" rawValue={config.fieldbus.lossRate} min={0} max={15} step={0.1} toDisplay={(value) => value * 100} fromDisplay={(value) => value / 100} disabled={busy} onChange={onParameterChange} />
+        <ParameterControl path="fieldbus.duplicateRate" label="重复包率" unit="%" rawValue={config.fieldbus.duplicateRate} min={0} max={10} step={0.1} toDisplay={(value) => value * 100} fromDisplay={(value) => value / 100} disabled={busy} onChange={onParameterChange} />
+        <ParameterControl path="fieldbus.corruptionRate" label="CRC 损坏率" unit="%" rawValue={config.fieldbus.corruptionRate} min={0} max={5} step={0.05} toDisplay={(value) => value * 100} fromDisplay={(value) => value / 100} disabled={busy} onChange={onParameterChange} />
+      </section>
+
+      <section className="inspector-section">
+        <div className="inspector-heading"><div><h2>定时故障计划</h2><p>所有故障均写入场景配置和事件日志；默认关闭。</p></div></div>
+        <div className="fault-plan-list">
+          <article className="fault-plan-card">
+            <FaultSwitch title="无线静默窗口" detail="窗口内抑制箭地双向发包" enabled={config.faults.radioBlackout.enabled} disabled={busy} onChange={(enabled) => updateFaults((faults) => { faults.radioBlackout.enabled = enabled; })} />
+            <ParameterControl path="faults.radioBlackout.startTimeS" label="开始时刻" unit="s" rawValue={config.faults.radioBlackout.startTimeS} min={0} max={config.durationS} step={0.1} disabled={busy} onChange={onParameterChange} />
+            <ParameterControl path="faults.radioBlackout.durationS" label="持续时间" unit="s" rawValue={config.faults.radioBlackout.durationS} min={0.1} max={10} step={0.1} disabled={busy} onChange={onParameterChange} />
+          </article>
+          <article className="fault-plan-card">
+            <FaultSwitch title="单绞盘卡滞" detail="指定轴在窗口内保持当前位置" enabled={config.faults.winchStuck.enabled} disabled={busy} onChange={(enabled) => updateFaults((faults) => { faults.winchStuck.enabled = enabled; })} />
+            <label className="fault-select"><span>故障节点</span><select value={config.faults.winchStuck.node} disabled={busy} onChange={(event) => updateFaults((faults) => { faults.winchStuck.node = event.currentTarget.value as WinchNodeId; })}><option value="winch-x-negative">X− 绞盘</option><option value="winch-x-positive">X+ 绞盘</option><option value="winch-y-negative">Y− 绞盘</option><option value="winch-y-positive">Y+ 绞盘</option></select></label>
+            <ParameterControl path="faults.winchStuck.startTimeS" label="开始时刻" unit="s" rawValue={config.faults.winchStuck.startTimeS} min={0} max={config.durationS} step={0.1} disabled={busy} onChange={onParameterChange} />
+            <ParameterControl path="faults.winchStuck.durationS" label="持续时间" unit="s" rawValue={config.faults.winchStuck.durationS} min={0.1} max={15} step={0.1} disabled={busy} onChange={onParameterChange} />
+          </article>
+          <article className="fault-plan-card">
+            <FaultSwitch title="导航偏置阶跃" detail="箭上位置解算叠加可控偏置" enabled={config.faults.sensorBiasStep.enabled} disabled={busy} onChange={(enabled) => updateFaults((faults) => { faults.sensorBiasStep.enabled = enabled; })} />
+            <ParameterControl path="faults.sensorBiasStep.startTimeS" label="开始时刻" unit="s" rawValue={config.faults.sensorBiasStep.startTimeS} min={0} max={config.durationS} step={0.1} disabled={busy} onChange={onParameterChange} />
+            <ParameterControl path="faults.sensorBiasStep.durationS" label="持续时间" unit="s" rawValue={config.faults.sensorBiasStep.durationS} min={0.1} max={15} step={0.1} disabled={busy} onChange={onParameterChange} />
+            <ParameterControl path="faults.sensorBiasStep.deltaM.0" label="X 偏置" unit="m" rawValue={config.faults.sensorBiasStep.deltaM[0]} min={-5} max={5} step={0.1} disabled={busy} onChange={onParameterChange} />
+            <ParameterControl path="faults.sensorBiasStep.deltaM.1" label="Y 偏置" unit="m" rawValue={config.faults.sensorBiasStep.deltaM[1]} min={-5} max={5} step={0.1} disabled={busy} onChange={onParameterChange} />
+            <ParameterControl path="faults.sensorBiasStep.deltaM.2" label="Z 偏置" unit="m" rawValue={config.faults.sensorBiasStep.deltaM[2]} min={-5} max={5} step={0.1} disabled={busy} onChange={onParameterChange} />
+          </article>
+          <article className="fault-plan-card">
+            <FaultSwitch title="推力降额" detail="窗口内按比例缩放控制器推力指令" enabled={config.faults.thrustScale.enabled} disabled={busy} onChange={(enabled) => updateFaults((faults) => { faults.thrustScale.enabled = enabled; })} />
+            <ParameterControl path="faults.thrustScale.startTimeS" label="开始时刻" unit="s" rawValue={config.faults.thrustScale.startTimeS} min={0} max={config.durationS} step={0.1} disabled={busy} onChange={onParameterChange} />
+            <ParameterControl path="faults.thrustScale.durationS" label="持续时间" unit="s" rawValue={config.faults.thrustScale.durationS} min={0.1} max={15} step={0.1} disabled={busy} onChange={onParameterChange} />
+            <ParameterControl path="faults.thrustScale.scale" label="剩余推力" unit="%" rawValue={config.faults.thrustScale.scale} min={0} max={100} step={1} toDisplay={(value) => value * 100} fromDisplay={(value) => value / 100} disabled={busy} onChange={onParameterChange} />
+          </article>
+        </div>
       </section>
     </div>
   );
@@ -554,123 +574,127 @@ function OutcomeBadge({ run }: { run: SimulationRun }) {
   return <span className="outcome-badge"><CircleGauge size={16} />未发生捕获</span>;
 }
 
+function ProgressBlock({ progress, onCancel }: { progress: TaskProgress; onCancel?: (() => void) | undefined }) {
+  const percent = progress.total <= 0 ? 0 : Math.min(100, progress.completed / progress.total * 100);
+  return (
+    <div className="task-progress" role="status" aria-live="polite">
+      <div><strong>{progress.label}</strong><span>{progress.completed}/{progress.total}</span></div>
+      <div className="task-progress-track"><i style={{ width: `${percent}%` }} /></div>
+      {onCancel === undefined ? null : <button type="button" onClick={onCancel}><Square size={13} fill="currentColor" />取消</button>}
+    </div>
+  );
+}
+
+const qualityLabel = (quality: "good" | "caution" | "poor"): string =>
+  quality === "good" ? "收敛良好" : quality === "caution" ? "需要谨慎" : "不满足定量使用";
+
 function ExperimentInspector({
   run,
+  config,
   busy,
+  dirty,
+  onSeedChange,
+  onRerun,
+  onImportScenario,
+  importNotice,
+  onExportScenario,
+  onExportRun,
   onRunMonteCarlo,
+  onRunValidation,
+  onCancelTask,
   monteCarloSummary,
-  busyMonteCarlo
-}: Pick<InspectorProps, "run" | "busy" | "onRunMonteCarlo" | "monteCarloSummary" | "busyMonteCarlo">) {
-  const [sampleCount, setSampleCount] = useState(50);
+  validationResult,
+  activeTask,
+  taskProgress
+}: Pick<
+  InspectorProps,
+  "run" | "config" | "busy" | "dirty" | "onSeedChange" | "onRerun" |
+  "onImportScenario" | "importNotice" | "onExportScenario" | "onExportRun" |
+  "onRunMonteCarlo" | "onRunValidation" | "onCancelTask" | "monteCarloSummary" |
+  "validationResult" | "activeTask" | "taskProgress"
+>) {
+  const [sampleCount, setSampleCount] = useState(5);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const maxLoad = useMemo(() => {
     if (monteCarloSummary === null || monteCarloSummary.variants.length === 0) return 1;
-    return Math.max(1, ...monteCarloSummary.variants.map((variant) => variant.p95PeakLoadG));
+    return Math.max(1, ...monteCarloSummary.variants.map((variant) => variant.p95PeakLoadKn));
   }, [monteCarloSummary]);
+  const taskBusy = activeTask !== null;
 
   return (
     <div className="inspector-scroll">
       <section className="inspector-section">
-        <div className="inspector-heading">
-          <div><h2>单场景结果</h2><p>取完整运行的最终指标，不用当前帧冒充结果。</p></div>
+        <div className="inspector-heading"><div><h2>可重复运行与场景文件</h2><p>同一配置、模型版本与 seed 应得到逐位一致的结果。</p></div></div>
+        <div className="reproducibility-box">
+          <label><span>实验 seed</span><input type="number" step={1} value={config.seed} disabled={busy || taskBusy} onChange={(event) => { const value = event.currentTarget.valueAsNumber; if (Number.isSafeInteger(value)) onSeedChange(value); }} /></label>
+          <button type="button" disabled={busy || taskBusy} onClick={onRerun}>{busy ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />}{dirty ? "应用参数并重算" : "按相同配置重算"}</button>
         </div>
-        {run === null ? (
-          <div className="inline-empty">尚未运行单场景</div>
-        ) : (
-          <>
-            <OutcomeBadge run={run} />
-            <div className="stat-grid experiment-stat-grid">
-              <div><span>最小错位</span><strong>{formatNumber(run.metrics.missDistanceM, 2)} <small>m</small></strong></div>
-              <div><span>捕获相对速度</span><strong>{formatNumber(run.metrics.captureRelativeSpeedMps, 2)} <small>m/s</small></strong></div>
-              <div><span>峰值接触力</span><strong>{formatNumber(run.metrics.peakContactForceN / 1_000, 0)} <small>kN</small></strong></div>
-              <div><span>峰值载荷</span><strong>{formatNumber(run.metrics.peakApparentLoadG, 2)} <small>g</small></strong></div>
-              <div><span>峰值绳张力</span><strong>{formatNumber(run.metrics.peakRopeTensionN / 1_000, 0)} <small>kN</small></strong></div>
-              <div><span>最大估计误差</span><strong>{formatNumber(run.metrics.maxEstimateErrorM, 2)} <small>m</small></strong></div>
-            </div>
-          </>
-        )}
+        <div className="export-actions export-actions--three">
+          <input ref={fileInputRef} className="sr-only" type="file" accept="application/json,.json" onChange={(event) => { const file = event.currentTarget.files?.[0]; if (file !== undefined) onImportScenario(file); event.currentTarget.value = ""; }} />
+          <button type="button" disabled={busy || taskBusy} onClick={() => fileInputRef.current?.click()}><Upload size={15} />导入场景</button>
+          <button type="button" disabled={busy || taskBusy} onClick={onExportScenario}><Download size={15} />导出场景</button>
+          <button type="button" disabled={busy || taskBusy || run === null} onClick={onExportRun}><Download size={15} />导出结果</button>
+        </div>
+        {importNotice === null ? null : <div className="inline-notice">{importNotice}</div>}
+        <p className="reproducibility-note">导入器支持 v1 原始配置、v0.2 文档包和当前 v2 文档包；高于当前版本的文件会被拒绝。</p>
       </section>
 
       <section className="inspector-section">
-        <div className="inspector-heading">
-          <div><h2>Monte Carlo 对照</h2><p>比较固定网、α-β 与预测协同的捕获率和载荷代价。</p></div>
-        </div>
-        <div className="monte-carlo-controls">
-          <label>
-            <span>样本数</span>
-            <select value={sampleCount} onChange={(event) => setSampleCount(Number(event.currentTarget.value))} disabled={busy || busyMonteCarlo}>
-              <option value={20}>20</option>
-              <option value={50}>50</option>
-              <option value={100}>100</option>
-              <option value={200}>200</option>
-            </select>
-          </label>
-          <button
-            type="button"
-            disabled={onRunMonteCarlo === undefined || busy || busyMonteCarlo}
-            onClick={() => onRunMonteCarlo?.(sampleCount)}
-          >
-            {busyMonteCarlo ? <LoaderCircle className="spin" size={17} /> : <PlayCircle size={17} />}
-            {busyMonteCarlo ? "批量计算中" : "运行对照"}
-          </button>
-        </div>
-        {monteCarloSummary === null ? (
-          <div className="inline-empty">
-            <strong>尚未运行</strong>
-            <span>{onRunMonteCarlo === undefined ? "批量试验入口尚未接入" : "选择样本数后启动闭环模式对照"}</span>
-          </div>
-        ) : (
-          <div className="comparison-list" aria-label={`${monteCarloSummary.sampleCount} 次 Monte Carlo 汇总`}>
-            {monteCarloSummary.variants.map((variant) => (
-              <article className="comparison-row" key={variant.id}>
-                <div className="comparison-title">
-                  <strong>{variant.label}</strong>
-                  <span>{variant.captures}/{variant.runs} 捕获</span>
-                </div>
-                <div className="comparison-measure">
-                  <span>捕获率</span>
-                  <div><i style={{ width: `${Math.max(0, Math.min(100, variant.captureRate * 100))}%` }} /></div>
-                  <strong>{(variant.captureRate * 100).toFixed(1)}%</strong>
-                </div>
-                <div className="comparison-measure comparison-measure--load">
-                  <span>P95 载荷</span>
-                  <div><i style={{ width: `${Math.max(0, Math.min(100, variant.p95PeakLoadG / maxLoad * 100))}%` }} /></div>
-                  <strong>{variant.p95PeakLoadG.toFixed(2)} g</strong>
-                </div>
-                <small>均值 {variant.meanPeakLoadG.toFixed(2)} g · {variant.algorithm}</small>
-              </article>
-            ))}
-          </div>
-        )}
+        <div className="inspector-heading"><div><h2>单场景结果</h2><p>取完整运行的最终指标，不用当前帧冒充结果。</p></div></div>
+        {dirty && run !== null ? <div className="inline-warning">当前显示的是上一次已运行配置的结果；应用参数并重算后才会更新。</div> : null}
+        {run === null ? <div className="inline-empty">尚未运行单场景</div> : <><OutcomeBadge run={run} /><div className="stat-grid experiment-stat-grid"><div><span>最小错位</span><strong>{formatNumber(run.metrics.missDistanceM, 2)} <small>m</small></strong></div><div><span>捕获相对速度</span><strong>{formatNumber(run.metrics.captureRelativeSpeedMps, 2)} <small>m/s</small></strong></div><div><span>峰值接触力</span><strong>{formatNumber(run.metrics.peakContactForceN / 1_000, 0)} <small>kN</small></strong></div><div><span>峰值载荷</span><strong>{formatNumber(run.metrics.peakApparentLoadG, 2)} <small>g</small></strong></div><div><span>峰值绳张力</span><strong>{formatNumber(run.metrics.peakRopeTensionN / 1_000, 0)} <small>kN</small></strong></div><div><span>最大估计误差</span><strong>{formatNumber(run.metrics.maxEstimateErrorM, 2)} <small>m</small></strong></div></div></>}
       </section>
 
       <section className="inspector-section">
-        <div className="inspector-heading"><div><h2>事件证据</h2><p>最近的状态切换、接触与故障事件。</p></div></div>
-        {run === null || run.events.length === 0 ? (
-          <div className="inline-empty">暂无事件</div>
-        ) : (
-          <ol className="event-list">
-            {run.events.slice(-8).map((event, index) => (
-              <li key={`${event.tick}-${event.type}-${index}`} className={`event-${event.severity}`}>
-                <time>{(event.tick * run.config.physicsDtS).toFixed(2)} s</time>
-                <span><strong>{event.type}</strong>{event.message}</span>
-              </li>
-            ))}
-          </ol>
-        )}
+        <div className="inspector-heading"><div><h2>有界扰动对照</h2><p>每种算法使用同一组扰动；批量进度按每个实际运行回传。</p></div></div>
+        <div className="monte-carlo-controls"><label><span>样本数</span><select value={sampleCount} onChange={(event) => setSampleCount(Number(event.currentTarget.value))} disabled={busy || taskBusy}><option value={3}>3</option><option value={5}>5</option><option value={10}>10</option><option value={20}>20</option></select></label><button type="button" className={activeTask === "comparison" ? "is-cancel" : ""} disabled={busy || (taskBusy && activeTask !== "comparison") || (activeTask === "comparison" ? onCancelTask === undefined : onRunMonteCarlo === undefined)} onClick={() => activeTask === "comparison" ? onCancelTask?.() : onRunMonteCarlo?.(sampleCount)}>{activeTask === "comparison" ? <Square size={15} fill="currentColor" /> : <PlayCircle size={17} />}{activeTask === "comparison" ? "取消对照" : "运行对照"}</button></div>
+        {activeTask === "comparison" && taskProgress !== null ? <ProgressBlock progress={taskProgress} onCancel={onCancelTask} /> : null}
+        {monteCarloSummary === null ? <div className="inline-empty"><strong>尚未运行</strong><span>选择样本数后启动成对扰动闭环模式对照</span></div> : <div className="comparison-list" aria-label={`${monteCarloSummary.sampleCount} 次 Monte Carlo 汇总`}>{monteCarloSummary.variants.map((variant) => <article className="comparison-row" key={variant.id}><div className="comparison-title"><strong>{variant.label}</strong><span>{variant.secured}/{variant.runs} 稳定 · {variant.captures} 捕获</span></div><div className="comparison-measure"><span>稳定率</span><div><i style={{ width: `${Math.max(0, Math.min(100, variant.securedRate * 100))}%` }} /></div><strong>{(variant.securedRate * 100).toFixed(1)}%</strong></div><div className="comparison-measure comparison-measure--load"><span>P95 接触力</span><div><i style={{ width: `${Math.max(0, Math.min(100, variant.p95PeakLoadKn / maxLoad * 100))}%` }} /></div><strong>{variant.p95PeakLoadKn.toFixed(0)} kN</strong></div><small>捕获率 {(variant.captureRate * 100).toFixed(1)}% · 接触力均值 {variant.meanPeakLoadKn.toFixed(0)} kN · {variant.algorithm}</small></article>)}</div>}
+      </section>
+
+      <section className="inspector-section">
+        <div className="inspector-heading"><div><h2>数值验证</h2><p>用 Δt、Δt/2、Δt/4 检查步长收敛，并建立接触阶段代理能量账本。</p></div></div>
+        <button className="wide-action" type="button" disabled={busy || (taskBusy && activeTask !== "validation") || onRunValidation === undefined} onClick={() => activeTask === "validation" ? onCancelTask?.() : onRunValidation?.()}>{activeTask === "validation" ? <Square size={15} fill="currentColor" /> : <PlayCircle size={17} />}{activeTask === "validation" ? "取消验证" : "运行收敛与能量验证"}</button>
+        {activeTask === "validation" && taskProgress !== null ? <ProgressBlock progress={taskProgress} onCancel={onCancelTask} /> : null}
+        {validationResult === null ? <div className="inline-empty">尚未运行数值验证</div> : <div className="validation-results"><article className={`quality-card quality-${validationResult.convergence.quality}`}><div><strong>步长收敛</strong><span>{qualityLabel(validationResult.convergence.quality)}</span></div><p>{validationResult.convergence.interpretation}</p>{validationResult.convergence.comparisons.map((comparison) => <small key={comparison.fineDtS}>{comparison.coarseDtS.toFixed(4)} → {comparison.fineDtS.toFixed(4)} s：最大归一差 {(comparison.maximumNormalizedDifference * 100).toFixed(2)}%，终态{comparison.categoricalAgreement ? "一致" : "不一致"}</small>)}</article><article className={`quality-card quality-${validationResult.energy.quality}`}><div><strong>接触能量账本</strong><span>{qualityLabel(validationResult.energy.quality)}</span></div><p>{validationResult.energy.interpretation}</p><small>未观测残差 {(validationResult.energy.normalizedResidual * 100).toFixed(1)}% · 接触净做功代理 {(validationResult.energy.contactWorkProxyJ / 1e6).toFixed(2)} MJ · 阻尼耗散代理 {(validationResult.energy.contactDissipationProxyJ / 1e6).toFixed(2)} MJ · 弹性能代理 {(validationResult.energy.finalElasticProxyJ / 1e6).toFixed(2)} MJ</small></article></div>}
+      </section>
+
+      <section className="inspector-section"><div className="inspector-heading"><div><h2>事件证据</h2><p>最近的状态切换、接触与故障启停事件。</p></div></div>{run === null || run.events.length === 0 ? <div className="inline-empty">暂无事件</div> : <ol className="event-list">{run.events.slice(-12).map((event, index) => <li key={`${event.tick}-${event.type}-${index}`} className={`event-${event.severity}`}><time>{(event.tick * run.config.physicsDtS).toFixed(2)} s</time><span><strong>{event.type}</strong>{event.message}</span></li>)}</ol>}</section>
+    </div>
+  );
+}
+
+function EvidenceInspector({
+  config,
+  busy,
+  onRunSensitivity,
+  onCancelTask,
+  traceabilityResult,
+  activeTask,
+  taskProgress
+}: Pick<InspectorProps, "config" | "busy" | "onRunSensitivity" | "onCancelTask" | "traceabilityResult" | "activeTask" | "taskProgress">) {
+  return (
+    <div className="inspector-scroll">
+      <section className="inspector-section">
+        <div className="inspector-heading"><div><h2>参数—证据—敏感性</h2><p>参数来源来自场景元数据；敏感性是在当前 seed 附近做单因素正向扰动得到。</p></div></div>
+        <button className="wide-action" type="button" disabled={busy || (activeTask !== null && activeTask !== "sensitivity") || onRunSensitivity === undefined} onClick={() => activeTask === "sensitivity" ? onCancelTask?.() : onRunSensitivity?.()}>{activeTask === "sensitivity" ? <Square size={15} fill="currentColor" /> : <PlayCircle size={17} />}{activeTask === "sensitivity" ? "取消敏感性计算" : "计算局部敏感性"}</button>
+        {activeTask === "sensitivity" && taskProgress !== null ? <ProgressBlock progress={taskProgress} onCancel={onCancelTask} /> : null}
+        {traceabilityResult === null ? <div className="inline-empty"><strong>证据表已内置</strong><span>点击计算后追加模型内局部敏感性分级</span></div> : <p className="reproducibility-note">{traceabilityResult.notice}</p>}
+      </section>
+      <section className="inspector-section traceability-section">
+        <div className="traceability-table" role="table" aria-label="参数证据敏感性追溯表">
+          {(traceabilityResult?.rows ?? Object.entries(config.parameterSources).slice(0, 10).map(([path, source]) => ({ path, label: path, value: Number.NaN, unit: "", source, perturbationPercent: 0, sensitivityScore: null, sensitivityLevel: null, dominantEffect: null, dominantEffectChangePercent: null }))).map((row) => <article className="traceability-row" key={row.path}><div className="traceability-row-head"><strong>{row.label}</strong><SourceTag source={row.source} /></div><code>{row.path}</code><div className="traceability-value"><span>{Number.isFinite(row.value) ? `${row.value.toLocaleString("zh-CN", { maximumFractionDigits: 4 })} ${row.unit}` : "当前场景来源条目"}</span><span>{row.sensitivityLevel === null ? "敏感性待计算" : <b className={`sensitivity-${row.sensitivityLevel}`}>{row.sensitivityLevel === "high" ? "高" : row.sensitivityLevel === "medium" ? "中" : "低"} · 系数 {(row.sensitivityScore ?? 0).toFixed(2)}</b>}</span></div><p><strong>证据：</strong>{row.source.source}。{row.source.note}</p>{row.dominantEffect === null ? null : <small>参数幅值 +{row.perturbationPercent}% 时，主导指标“{row.dominantEffect}”变化 {(row.dominantEffectChangePercent ?? 0).toFixed(1)}%</small>}</article>)}
+        </div>
       </section>
     </div>
   );
 }
 
 export function Inspector(props: InspectorProps) {
-  if (props.tab === "scenario") {
-    return <ScenarioInspector {...props} />;
-  }
-  if (props.tab === "communications") {
-    return <CommunicationsInspector {...props} />;
-  }
-  if (props.tab === "algorithm") {
-    return <AlgorithmInspector {...props} />;
-  }
+  const controlsBusy = props.busy || props.activeTask !== null;
+  if (props.tab === "scenario") return <ScenarioInspector {...props} busy={controlsBusy} />;
+  if (props.tab === "communications") return <CommunicationsInspector {...props} busy={controlsBusy} />;
+  if (props.tab === "algorithm") return <AlgorithmInspector {...props} busy={controlsBusy} />;
+  if (props.tab === "evidence") return <EvidenceInspector {...props} busy={props.busy} />;
   return <ExperimentInspector {...props} />;
 }

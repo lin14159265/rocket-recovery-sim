@@ -6,6 +6,7 @@ import type {
   Packet,
   RocketMode,
   ScenarioConfig,
+  SensorConfig,
   SimulationRun,
   SimulationSnapshot,
   StateEstimate,
@@ -17,6 +18,7 @@ import type {
   WinchStatusPayload
 } from "./contracts";
 import { WINCH_IDS } from "./contracts";
+import { fingerprintScenarioConfig } from "./config";
 import {
   CaptureCoordinator,
   RocketController,
@@ -101,6 +103,8 @@ interface EstimatorLike {
   update(measurement: Parameters<AlphaBetaEstimator["update"]>[0]): StateEstimate;
   snapshot(): StateEstimate | null;
 }
+
+export const SIMULATION_MODEL_VERSION = "0.3.0";
 
 const terminalSupervisorStates = new Set<SupervisorState>([
   "SECURED",
@@ -200,6 +204,43 @@ const makeInitialWinchCommands = (config: ScenarioConfig): Record<WinchNodeId, W
     requestedMode: "open"
   }
 });
+
+const windowActive = (timeS: number, fault: { enabled: boolean; startTimeS: number; durationS: number }): boolean =>
+  fault.enabled && timeS >= fault.startTimeS && timeS < fault.startTimeS + fault.durationS;
+
+const simulationFaultsFor = (config: ScenarioConfig, options?: SimulationFaultPlan): SimulationFaultPlan => ({
+  radioBlackouts: [
+    ...(options?.radioBlackouts ?? []),
+    ...(config.faults.radioBlackout.enabled
+      ? [{
+          startTimeS: config.faults.radioBlackout.startTimeS,
+          endTimeS: config.faults.radioBlackout.startTimeS + config.faults.radioBlackout.durationS
+        }]
+      : [])
+  ],
+  winchStuck: [
+    ...(options?.winchStuck ?? []),
+    ...(config.faults.winchStuck.enabled
+      ? [{
+          node: config.faults.winchStuck.node,
+          startTimeS: config.faults.winchStuck.startTimeS,
+          endTimeS: config.faults.winchStuck.startTimeS + config.faults.winchStuck.durationS
+        }]
+      : [])
+  ]
+});
+
+const sensorConfigAt = (config: ScenarioConfig, timeS: number): SensorConfig => {
+  if (!windowActive(timeS, config.faults.sensorBiasStep)) return config.sensors;
+  return {
+    ...config.sensors,
+    positionBiasM: [
+      config.sensors.positionBiasM[0] + config.faults.sensorBiasStep.deltaM[0],
+      config.sensors.positionBiasM[1] + config.faults.sensorBiasStep.deltaM[1],
+      config.sensors.positionBiasM[2] + config.faults.sensorBiasStep.deltaM[2]
+    ]
+  };
+};
 
 const blackoutActive = (tick: number, dtS: number, faults?: SimulationFaultPlan): boolean => {
   const timeS = tick * dtS;
@@ -401,6 +442,7 @@ export const runSimulation = (
 ): SimulationRun => {
   const config = structuredClone(inputConfig);
   const dtS = config.physicsDtS;
+  const simulationFaults = simulationFaultsFor(config, options.faults);
   const sensorTicks = intervalTicks(config.sensors.sensorRateHz, dtS, "sensorRateHz");
   const controlTicks = intervalTicks(config.controller.controlRateHz, dtS, "controlRateHz");
   const telemetryTicks = intervalTicks(config.controller.telemetryRateHz, dtS, "telemetryRateHz");
@@ -456,7 +498,8 @@ export const runSimulation = (
   const frames: SimulationSnapshot[] = [];
   const telemetry: TelemetrySample[] = [];
   const events: DomainEvent[] = [];
-  const runId = `${config.id}-seed-${config.seed}`;
+  const configFingerprint = fingerprintScenarioConfig(config);
+  const runId = `${config.id}-${config.controller.algorithm}-seed-${config.seed}-cfg-${configFingerprint}`;
   const event = (
     tick: number,
     type: string,
@@ -486,18 +529,68 @@ export const runSimulation = (
   let heldPlantInput: PlantStepInput = createNeutralPlantInput(config);
   let nextFrameTimeS = 0;
   let finalSnapshot: SimulationSnapshot | null = null;
+  const previousFaultState = new Map<string, boolean>();
+  const reportFaultTransition = (
+    tick: number,
+    key: string,
+    active: boolean,
+    label: string
+  ): void => {
+    const previous = previousFaultState.get(key) ?? false;
+    if (active === previous) return;
+    previousFaultState.set(key, active);
+    event(
+      tick,
+      active ? "FAULT_INJECTED" : "FAULT_CLEARED",
+      active ? "warning" : "info",
+      `${label}${active ? "开始" : "结束"}`
+    );
+  };
+
+  const snapshotForCurrentStep = (
+    snapshotMetrics: ReturnType<typeof currentMetrics>
+  ): SimulationSnapshot => {
+    if (rocketEstimate === null || groundEstimate === null) {
+      throw new Error("cannot record a snapshot before estimators initialize");
+    }
+    return {
+      runId,
+      tick: plantState.tick,
+      timeS: plantState.timeS,
+      rocket: structuredClone(plantState.rocket),
+      platform: structuredClone(plantState.platform),
+      net: structuredClone(plantState.net),
+      rocketEstimate: cloneEstimate(rocketEstimate, "rocket-nav"),
+      groundEstimate: cloneEstimate(groundEstimate),
+      capturePlan: coordinatorOutput?.plan === null || coordinatorOutput === null
+        ? null
+        : structuredClone(coordinatorOutput.plan),
+      control: structuredClone(heldPlantInput.rocketControl),
+      supervisorState: coordinatorOutput?.state ?? "BOOT",
+      radioStats: boundedNetworkStats(radio),
+      fieldbusStats: boundedNetworkStats(fieldbus),
+      metrics: snapshotMetrics,
+      latestEvents: events.slice(-8).map((entry) => ({ ...entry }))
+    };
+  };
 
   for (let tick = 0; tick < maximumTick; tick += 1) {
+    const timeS = tick * dtS;
+    reportFaultTransition(tick, "radio", windowActive(timeS, config.faults.radioBlackout), "无线静默窗口");
+    reportFaultTransition(tick, "winch", windowActive(timeS, config.faults.winchStuck), `${config.faults.winchStuck.node} 卡滞`);
+    reportFaultTransition(tick, "sensor", windowActive(timeS, config.faults.sensorBiasStep), "箭上导航偏置阶跃");
+    reportFaultTransition(tick, "thrust", windowActive(timeS, config.faults.thrustScale), "推力降额");
     if (tick % sensorTicks === 0) {
+      const activeSensorConfig = sensorConfigAt(config, timeS);
       rocketEstimate = cloneEstimate(
-        rocketEstimator.update(sampleRocketNavigation(tick, plantState.rocket, config.sensors, rocketSensorRng)),
+        rocketEstimator.update(sampleRocketNavigation(tick, plantState.rocket, activeSensorConfig, rocketSensorRng)),
         "rocket-nav"
       );
       groundEstimate = groundEstimator.update(
-        sampleGroundTracking(tick, plantState.rocket, config.sensors, groundSensorRng)
+        sampleGroundTracking(tick, plantState.rocket, activeSensorConfig, groundSensorRng)
       );
       platformEstimate = platformEstimator.update(
-        sampleGroundTracking(tick, plantState.platform, config.sensors, platformSensorRng)
+        sampleGroundTracking(tick, plantState.platform, activeSensorConfig, platformSensorRng)
       );
       attitudeFrame = sampleAttitudeSensors(plantState);
     }
@@ -565,7 +658,7 @@ export const runSimulation = (
       agreedPlanAtRocket.confidenceRadiusM + config.controller.requiredApertureMarginM <
         config.net.openHalfSpacingM - config.rocket.radiusM;
 
-    const radioSuppressed = blackoutActive(tick, dtS, options.faults);
+    const radioSuppressed = blackoutActive(tick, dtS, simulationFaults);
     if (tick % telemetryTicks === 0 && !radioSuppressed) {
       const rocketMode = rocketModeFor(
         rocketEstimate.positionM[2] - capturePlaneWorldZ,
@@ -754,6 +847,9 @@ export const runSimulation = (
         verticalVelocityReferenceMps,
         engineEnabled
       });
+      if (windowActive(timeS, config.faults.thrustScale)) {
+        command.desiredThrustN *= config.faults.thrustScale.scale;
+      }
       const requestedRocketMode = rocketModeFor(
         altitudeAbovePlaneM,
         captureReady,
@@ -774,7 +870,7 @@ export const runSimulation = (
         requestedRocketMode
       };
     }
-    heldPlantInput.winchStuck = activeWinchFaults(tick, dtS, options.faults);
+    heldPlantInput.winchStuck = activeWinchFaults(tick, dtS, simulationFaults);
 
     plantState = plant.step(heldPlantInput);
     const metrics = metricsAccumulator.update(
@@ -820,36 +916,23 @@ export const runSimulation = (
     }
 
     if (plantState.timeS + 1e-12 >= nextFrameTimeS) {
-      const snapshotMetrics = currentMetrics(metricsAccumulator, coordinatorOutput);
-      const snapshot: SimulationSnapshot = {
-        runId,
-        tick: plantState.tick,
-        timeS: plantState.timeS,
-        rocket: structuredClone(plantState.rocket),
-        platform: structuredClone(plantState.platform),
-        net: structuredClone(plantState.net),
-        rocketEstimate: cloneEstimate(rocketEstimate, "rocket-nav"),
-        groundEstimate: cloneEstimate(groundEstimate),
-        capturePlan: coordinatorOutput?.plan === null || coordinatorOutput === null
-          ? null
-          : structuredClone(coordinatorOutput.plan),
-        control: structuredClone(heldPlantInput.rocketControl),
-        supervisorState: coordinatorOutput?.state ?? "BOOT",
-        radioStats: boundedNetworkStats(radio),
-        fieldbusStats: boundedNetworkStats(fieldbus),
-        metrics: snapshotMetrics,
-        latestEvents: events.slice(-8).map((entry) => ({ ...entry }))
-      };
+      const snapshot = snapshotForCurrentStep(currentMetrics(metricsAccumulator, coordinatorOutput));
       frames.push(snapshot);
       finalSnapshot = snapshot;
       nextFrameTimeS += 1 / frameRateHz;
     }
 
-    if (
-      options.stopOnTerminal === true &&
-      coordinatorOutput !== null &&
-      terminalSupervisorStates.has(coordinatorOutput.state)
-    ) {
+    const supervisorTerminal = coordinatorOutput !== null &&
+      terminalSupervisorStates.has(coordinatorOutput.state);
+    const physicalTerminalReady = coordinatorOutput?.state !== "SECURED" || metrics.secured;
+    if (options.stopOnTerminal === true && supervisorTerminal && physicalTerminalReady) {
+      const terminalSnapshot = snapshotForCurrentStep(currentMetrics(metricsAccumulator, coordinatorOutput));
+      if (frames.at(-1)?.tick === terminalSnapshot.tick) {
+        frames[frames.length - 1] = terminalSnapshot;
+      } else {
+        frames.push(terminalSnapshot);
+      }
+      finalSnapshot = terminalSnapshot;
       break;
     }
     void metrics;
@@ -859,14 +942,31 @@ export const runSimulation = (
     throw new Error("simulation produced no snapshots");
   }
   const finalMetrics = currentMetrics(metricsAccumulator, coordinatorOutput);
-  finalSnapshot = {
-    ...finalSnapshot,
-    metrics: finalMetrics,
+  const exactFinalSnapshot: SimulationSnapshot = {
+    runId,
+    tick: plantState.tick,
+    timeS: plantState.timeS,
+    rocket: structuredClone(plantState.rocket),
+    platform: structuredClone(plantState.platform),
+    net: structuredClone(plantState.net),
+    rocketEstimate: cloneEstimate(rocketEstimate!, "rocket-nav"),
+    groundEstimate: cloneEstimate(groundEstimate!),
+    capturePlan: coordinatorOutput?.plan === null || coordinatorOutput === null
+      ? null
+      : structuredClone(coordinatorOutput.plan),
+    control: structuredClone(heldPlantInput.rocketControl),
+    supervisorState: coordinatorOutput?.state ?? "BOOT",
     radioStats: radio.getStats(),
     fieldbusStats: fieldbus.getStats(),
+    metrics: finalMetrics,
     latestEvents: events.slice(-8).map((entry) => ({ ...entry }))
   };
-  frames[frames.length - 1] = finalSnapshot;
+  finalSnapshot = exactFinalSnapshot;
+  if (frames.at(-1)?.tick === exactFinalSnapshot.tick) {
+    frames[frames.length - 1] = exactFinalSnapshot;
+  } else {
+    frames.push(exactFinalSnapshot);
+  }
   event(
     finalSnapshot.tick,
     "SIMULATION_FINISHED",
@@ -875,16 +975,20 @@ export const runSimulation = (
       ? "仿真结束：已捕获并稳定"
       : `仿真结束：${finalMetrics.failureReason ?? "未在时限内稳定"}`
   );
+  finalSnapshot = {
+    ...finalSnapshot,
+    latestEvents: events.slice(-8).map((entry) => ({ ...entry }))
+  };
+  frames[frames.length - 1] = finalSnapshot;
 
   return {
+    modelVersion: SIMULATION_MODEL_VERSION,
+    configFingerprint,
     config,
     frames,
     telemetry,
     events,
-    finalSnapshot: {
-      ...finalSnapshot,
-      latestEvents: events.slice(-8).map((entry) => ({ ...entry }))
-    },
+    finalSnapshot,
     metrics: finalMetrics
   };
 };

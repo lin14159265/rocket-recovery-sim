@@ -81,11 +81,20 @@ export interface AlgorithmExperimentSummary {
   failureReasons: Record<string, number>;
 }
 
+export interface AlgorithmComparisonProgress {
+  completed: number;
+  total: number;
+  algorithm: AlgorithmMode;
+  sampleIndex: number;
+  label: string;
+}
+
 export interface AlgorithmComparisonOptions {
   samplesPerVariant?: number;
   seed?: number;
   bounds?: Partial<PerturbationBounds>;
   simulationOptions?: SimulationOptions;
+  onProgress?: (progress: AlgorithmComparisonProgress) => void;
 }
 
 export interface AlgorithmComparisonResult {
@@ -350,6 +359,13 @@ export const runAlgorithmComparison = (
           metrics.captured,
           metrics.failureReason
         )
+      });
+      options.onProgress?.({
+        completed: trials.length,
+        total: ALGORITHM_VARIANTS.length * samplesPerVariant,
+        algorithm,
+        sampleIndex: perturbation.sampleIndex,
+        label: `${algorithm} · 样本 ${perturbation.sampleIndex + 1}/${samplesPerVariant}`
       });
     }
   }

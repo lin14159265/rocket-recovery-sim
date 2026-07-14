@@ -1,4 +1,5 @@
 import type { ParameterSource, ScenarioConfig } from "./contracts";
+import { crc32, stableStringify } from "./comms/protocol";
 
 const source = (status: ParameterSource["status"], sourceText: string, note: string): ParameterSource => ({
   status,
@@ -6,8 +7,11 @@ const source = (status: ParameterSource["status"], sourceText: string, note: str
   note
 });
 
+export const fingerprintScenarioConfig = (config: ScenarioConfig): string =>
+  crc32(stableStringify(config)).toString(16).padStart(8, "0");
+
 export const createNominalScenario = (): ScenarioConfig => ({
-  schemaVersion: 1,
+  schemaVersion: 2,
   id: "nominal-cooperative",
   name: "标称协同捕获",
   description: "公开机理约束下的候选闭环；数值参数为截图标定或研究假设。",
@@ -106,19 +110,48 @@ export const createNominalScenario = (): ScenarioConfig => ({
     corruptionRate: 0.0002,
     bandwidthPacketsPerSecond: 1_000
   },
+  faults: {
+    radioBlackout: { enabled: false, startTimeS: 10, durationS: 2 },
+    winchStuck: {
+      enabled: false,
+      node: "winch-x-positive",
+      startTimeS: 14,
+      durationS: 8
+    },
+    sensorBiasStep: {
+      enabled: false,
+      startTimeS: 8,
+      durationS: 6,
+      deltaM: [1, -0.6, 0.3]
+    },
+    thrustScale: {
+      enabled: false,
+      startTimeS: 10,
+      durationS: 6,
+      scale: 0.65
+    }
+  },
   parameterSources: {
     "rocket.lengthM": source("public-estimate", "公开整箭长度约 63 m；一级长度未公开", "43 m 为终端代理模型尺寸"),
     "rocket.radiusM": source("official", "官方公开整箭直径 5 m", "代理模型半径取 2.5 m"),
     "rocket.massKg": source("calibrated", "用户截图的稳态约 400 kN 与约 1 g", "仅为等效回收质量，不是官方一级质量"),
+    "rocket.initialVelocityMps.2": source("assumed", "公开报道未披露入网垂向速度", "-58 m/s 为终端下降代理初值；敏感性分析按幅值扰动"),
     "net.openHalfSpacingM": source("calibrated", "用户截图", "不是官方网系尺寸"),
     "net.closedHalfSpacingM": source("calibrated", "用户截图", "不是官方捕获阈值"),
     "net.totalStiffnessNpm": source("calibrated", "用户截图与等效停止距离", "四绳总等效值"),
     "net.totalDampingNspm": source("calibrated", "约 9 m/s 捕获速度对应约 0.95 MN 阻尼峰值", "四绳总等效值"),
+    "net.totalStrengthLimitN": source("assumed", "真实网系极限载荷未公开", "仅作为代理断绳状态阈值，不是结构许用载荷"),
     "net.winchMaxSpeedMps": source("assumed", "真实绞盘运动能力未公开", "满足 21 m 到 3 m 的 5.5 s 最小加加速度轨迹"),
     "controller.attitudeGains": source("assumed", "真实姿态控制律与带宽未公开", "按代理刚体惯量调至阻尼充足且不超过力矩限幅"),
     "controller.requiredApertureMarginM": source("assumed", "真实挂索几何与允许偏差未公开", "等效刚体捕获判据的研究余量"),
+    "radio.baseLatencyMs": source("assumed", "真实无线链路时延未公开", "45 ms 为闭环压力测试的代理基线"),
+    "radio.lossRate": source("assumed", "真实无线链路可靠性未公开", "2% 为随机丢包代理基线"),
+    "sensors.rocketPositionNoiseM": source("assumed", "真实箭上导航精度未公开", "0.35 m 为估计器对照所用噪声标准差"),
+    "controller.netCenterKp": source("calibrated", "依据当前代理平台与绞盘响应整定", "仅保证本模型闭环阻尼与限幅行为"),
+    "controller.staleTelemetryAbortS": source("assumed", "真实失联处置门限未公开", "0.8 s 为代理监督状态机中止阈值"),
     radio: source("assumed", "真实通信体制未公开", "用于压力测试的候选链路"),
-    sensors: source("assumed", "真实传感器配置未公开", "用于候选估计算法比较")
+    sensors: source("assumed", "真实传感器配置未公开", "用于候选估计算法比较"),
+    faults: source("assumed", "故障时序与幅值未公开", "仅用于闭环鲁棒性压力试验")
   }
 });
 

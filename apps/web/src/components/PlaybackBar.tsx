@@ -1,4 +1,4 @@
-import { LoaderCircle, Pause, Play, RotateCcw } from "lucide-react";
+import { LoaderCircle, Pause, Play, RotateCcw, StepBack, StepForward } from "lucide-react";
 
 export interface PlaybackBarProps {
   currentTimeS: number;
@@ -11,6 +11,7 @@ export interface PlaybackBarProps {
   canPlay: boolean;
   onTogglePlaying: () => void;
   onReset: () => void;
+  onStep: (direction: -1 | 1) => void;
   onSeek: (timeS: number) => void;
   onSpeedChange: (speed: number) => void;
 }
@@ -28,6 +29,7 @@ export function PlaybackBar({
   canPlay,
   onTogglePlaying,
   onReset,
+  onStep,
   onSeek,
   onSpeedChange
 }: PlaybackBarProps) {
@@ -44,6 +46,16 @@ export function PlaybackBar({
         </button>
         <button
           type="button"
+          className="step-button"
+          disabled={busy || !canPlay}
+          onClick={() => onStep(-1)}
+          aria-label="后退一帧"
+          title="后退一帧"
+        >
+          <StepBack size={19} />
+        </button>
+        <button
+          type="button"
           className="play-button"
           disabled={busy || !canPlay}
           onClick={onTogglePlaying}
@@ -51,6 +63,16 @@ export function PlaybackBar({
         >
           {playing ? <Pause size={24} fill="currentColor" /> : <Play size={24} fill="currentColor" />}
           {playing ? "暂停" : "播放"}
+        </button>
+        <button
+          type="button"
+          className="step-button"
+          disabled={busy || !canPlay}
+          onClick={() => onStep(1)}
+          aria-label="前进一帧"
+          title="前进一帧"
+        >
+          <StepForward size={19} />
         </button>
       </div>
 

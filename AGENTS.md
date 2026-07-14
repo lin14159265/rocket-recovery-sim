@@ -28,6 +28,8 @@
 - 测试：`npm test`
 - 无界面名义场景：`npm run lab`
 - Monte Carlo：`npm run lab:monte-carlo`
+- 步长与能量验证：`npm run lab:validate`
+- 参数敏感性：`npm run lab:sensitivity`
 
 ## 核心约束
 
@@ -45,4 +47,3 @@
 - 柔性绳和高速接触具有数值刚性，先用等效四绳模型闭环，再升级分段绳模型。
 - 任何成功结论至少需要：单元测试、同 seed 确定性测试、步长收敛检查、故障场景和闭环/开环对照。
 - 名义场景目标、容差及公开事实边界见 `docs/验证计划.md` 与 `docs/公开资料与模型边界.md`。
-

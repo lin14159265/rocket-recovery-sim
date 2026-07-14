@@ -1,0 +1,227 @@
+import type { ScenarioConfig } from "./contracts";
+import { createNominalScenario, fingerprintScenarioConfig } from "./config";
+import { SIMULATION_MODEL_VERSION } from "./simulation";
+
+export const CURRENT_SCENARIO_SCHEMA_VERSION = 2 as const;
+export const SCENARIO_DOCUMENT_FORMAT = "recovery-proxy-scenario" as const;
+
+export interface ScenarioDocument {
+  format: typeof SCENARIO_DOCUMENT_FORMAT;
+  documentVersion: 2;
+  modelVersion: string;
+  configFingerprint: string;
+  notice: string;
+  config: ScenarioConfig;
+}
+
+export interface ScenarioMigrationResult {
+  config: ScenarioConfig;
+  sourceDocumentVersion: number | null;
+  targetDocumentVersion: ScenarioDocument["documentVersion"];
+  sourceSchemaVersion: number;
+  targetSchemaVersion: typeof CURRENT_SCENARIO_SCHEMA_VERSION;
+  migrated: boolean;
+  warnings: string[];
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const finite = (value: unknown, label: string): number => {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new TypeError(`${label} 必须是有限数值`);
+  }
+  return value;
+};
+
+const positive = (value: unknown, label: string): number => {
+  const result = finite(value, label);
+  if (result <= 0) throw new RangeError(`${label} 必须大于 0`);
+  return result;
+};
+
+const probability = (value: unknown, label: string): number => {
+  const result = finite(value, label);
+  if (result < 0 || result > 1) throw new RangeError(`${label} 必须位于 [0, 1]`);
+  return result;
+};
+
+const mergeRecord = <T extends Record<string, unknown>>(baseline: T, value: unknown): T => {
+  if (!isRecord(value)) return structuredClone(baseline);
+  const output = structuredClone(baseline);
+  for (const [key, incoming] of Object.entries(value)) {
+    const current = output[key];
+    if (isRecord(current) && isRecord(incoming)) {
+      output[key as keyof T] = mergeRecord(current, incoming) as T[keyof T];
+    } else {
+      output[key as keyof T] = structuredClone(incoming) as T[keyof T];
+    }
+  }
+  return output;
+};
+
+interface ExtractedScenario {
+  candidate: Record<string, unknown>;
+  sourceDocumentVersion: number | null;
+}
+
+const extractConfigCandidate = (input: unknown): ExtractedScenario => {
+  if (!isRecord(input)) throw new TypeError("场景 JSON 顶层必须是对象");
+  if ("config" in input) {
+    if (input.format !== SCENARIO_DOCUMENT_FORMAT) {
+      throw new TypeError("无法识别的场景文档格式");
+    }
+    const sourceDocumentVersion = input.documentVersion === undefined
+      ? 1
+      : finite(input.documentVersion, "documentVersion");
+    if (!Number.isSafeInteger(sourceDocumentVersion) || sourceDocumentVersion < 1) {
+      throw new RangeError("无法识别的 documentVersion");
+    }
+    if (sourceDocumentVersion > 2) {
+      throw new RangeError(`场景 documentVersion=${sourceDocumentVersion} 高于当前支持的 2`);
+    }
+    if (!isRecord(input.config)) throw new TypeError("场景文档缺少 config 对象");
+    return { candidate: input.config, sourceDocumentVersion };
+  }
+  return { candidate: input, sourceDocumentVersion: null };
+};
+
+const ensureBoolean = (value: unknown, label: string): boolean => {
+  if (typeof value !== "boolean") throw new TypeError(`${label} 必须是布尔值`);
+  return value;
+};
+
+const nonNegative = (value: unknown, label: string): number => {
+  const result = finite(value, label);
+  if (result < 0) throw new RangeError(`${label} 不得小于 0`);
+  return result;
+};
+
+const finiteVector3 = (value: unknown, label: string): [number, number, number] => {
+  if (!Array.isArray(value) || value.length !== 3) {
+    throw new TypeError(`${label} 必须是长度为 3 的数值数组`);
+  }
+  return [
+    finite(value[0], `${label}[0]`),
+    finite(value[1], `${label}[1]`),
+    finite(value[2], `${label}[2]`)
+  ];
+};
+
+const validateLink = (link: ScenarioConfig["radio"], label: string): void => {
+  nonNegative(link.baseLatencyMs, `${label}.baseLatencyMs`);
+  nonNegative(link.jitterMs, `${label}.jitterMs`);
+  probability(link.lossRate, `${label}.lossRate`);
+  probability(link.duplicateRate, `${label}.duplicateRate`);
+  probability(link.corruptionRate, `${label}.corruptionRate`);
+  positive(link.bandwidthPacketsPerSecond, `${label}.bandwidthPacketsPerSecond`);
+};
+
+const validateScenario = (config: ScenarioConfig): void => {
+  if (typeof config.id !== "string" || config.id.trim().length === 0) {
+    throw new TypeError("id 必须是非空字符串");
+  }
+  if (typeof config.name !== "string" || config.name.trim().length === 0) {
+    throw new TypeError("name 必须是非空字符串");
+  }
+  if (!Number.isSafeInteger(config.seed)) throw new RangeError("seed 必须是安全整数");
+  positive(config.durationS, "durationS");
+  positive(config.physicsDtS, "physicsDtS");
+  if (config.physicsDtS > config.durationS) {
+    throw new RangeError("physicsDtS 不得大于 durationS");
+  }
+
+  positive(config.rocket.massKg, "rocket.massKg");
+  positive(config.rocket.thrustMaxN, "rocket.thrustMaxN");
+  finiteVector3(config.rocket.initialPositionM, "rocket.initialPositionM");
+  finiteVector3(config.rocket.initialVelocityMps, "rocket.initialVelocityMps");
+  positive(config.net.openHalfSpacingM, "net.openHalfSpacingM");
+  nonNegative(config.net.closedHalfSpacingM, "net.closedHalfSpacingM");
+  if (config.net.closedHalfSpacingM >= config.net.openHalfSpacingM) {
+    throw new RangeError("net.closedHalfSpacingM 必须小于 net.openHalfSpacingM");
+  }
+  positive(config.net.totalStiffnessNpm, "net.totalStiffnessNpm");
+  positive(config.net.totalDampingNspm, "net.totalDampingNspm");
+  positive(config.net.totalStrengthLimitN, "net.totalStrengthLimitN");
+  positive(config.sensors.sensorRateHz, "sensors.sensorRateHz");
+  nonNegative(config.sensors.rocketPositionNoiseM, "sensors.rocketPositionNoiseM");
+  finiteVector3(config.sensors.positionBiasM, "sensors.positionBiasM");
+
+  if (!["fixed", "alpha-beta", "predictive"].includes(config.controller.algorithm)) {
+    throw new RangeError("controller.algorithm 不是受支持的算法模式");
+  }
+  positive(config.controller.controlRateHz, "controller.controlRateHz");
+  positive(config.controller.telemetryRateHz, "controller.telemetryRateHz");
+  positive(config.controller.netControlRateHz, "controller.netControlRateHz");
+  positive(config.controller.staleTelemetryAbortS, "controller.staleTelemetryAbortS");
+  validateLink(config.radio, "radio");
+  validateLink(config.fieldbus, "fieldbus");
+
+  const faultEntries = Object.entries(config.faults) as Array<
+    [keyof ScenarioConfig["faults"], ScenarioConfig["faults"][keyof ScenarioConfig["faults"]]]
+  >;
+  for (const [label, fault] of faultEntries) {
+    ensureBoolean(fault.enabled, `faults.${label}.enabled`);
+    nonNegative(fault.startTimeS, `faults.${label}.startTimeS`);
+    positive(fault.durationS, `faults.${label}.durationS`);
+  }
+  if (!["winch-x-negative", "winch-x-positive", "winch-y-negative", "winch-y-positive"].includes(
+    config.faults.winchStuck.node
+  )) {
+    throw new RangeError("faults.winchStuck.node 不是受支持的绞盘节点");
+  }
+  finiteVector3(config.faults.sensorBiasStep.deltaM, "faults.sensorBiasStep.deltaM");
+  probability(config.faults.thrustScale.scale, "faults.thrustScale.scale");
+};
+
+/** Creates the stable, versioned interchange envelope used by the browser. */
+export const createScenarioDocument = (config: ScenarioConfig): ScenarioDocument => ({
+  format: SCENARIO_DOCUMENT_FORMAT,
+  documentVersion: 2,
+  modelVersion: SIMULATION_MODEL_VERSION,
+  configFingerprint: fingerprintScenarioConfig(config),
+  notice: "公开机理代理模型场景，不是官方型号参数",
+  config: structuredClone(config)
+});
+
+/** Accepts v1 raw configs, the v0.2 envelope, and the current v2 envelope. */
+export const migrateScenarioDocument = (input: unknown): ScenarioMigrationResult => {
+  const { candidate, sourceDocumentVersion } = extractConfigCandidate(input);
+  const sourceSchemaVersion = typeof candidate.schemaVersion === "number"
+    ? candidate.schemaVersion
+    : 1;
+  if (!Number.isSafeInteger(sourceSchemaVersion) || sourceSchemaVersion < 1) {
+    throw new RangeError("无法识别的 schemaVersion");
+  }
+  if (sourceSchemaVersion > CURRENT_SCENARIO_SCHEMA_VERSION) {
+    throw new RangeError(
+      `场景 schemaVersion=${sourceSchemaVersion} 高于当前支持的 ${CURRENT_SCENARIO_SCHEMA_VERSION}`
+    );
+  }
+
+  const baseline = createNominalScenario() as unknown as Record<string, unknown>;
+  const merged = mergeRecord(baseline, candidate) as unknown as ScenarioConfig;
+  merged.schemaVersion = CURRENT_SCENARIO_SCHEMA_VERSION;
+  const warnings: string[] = [];
+  if (sourceDocumentVersion === 1) {
+    warnings.push("已将 v0.2 交换文档补齐为 documentVersion 2");
+  }
+  if (sourceSchemaVersion < 2) {
+    warnings.push("已从 schema v1 补入显式故障计划；所有新增故障默认关闭");
+  }
+  if (!("parameterSources" in candidate)) {
+    warnings.push("原文件缺少参数来源，已用标称代理场景的来源说明补齐");
+  }
+  validateScenario(merged);
+  return {
+    config: merged,
+    sourceDocumentVersion,
+    targetDocumentVersion: 2,
+    sourceSchemaVersion,
+    targetSchemaVersion: CURRENT_SCENARIO_SCHEMA_VERSION,
+    migrated:
+      sourceSchemaVersion !== CURRENT_SCENARIO_SCHEMA_VERSION ||
+      (sourceDocumentVersion !== null && sourceDocumentVersion !== 2),
+    warnings
+  };
+};

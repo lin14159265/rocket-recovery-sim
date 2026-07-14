@@ -129,4 +129,3 @@ export const percentile = (values: number[], quantile: number): number => {
   const index = clamp(Math.ceil(quantile * sorted.length) - 1, 0, sorted.length - 1);
   return sorted[index] ?? 0;
 };
-

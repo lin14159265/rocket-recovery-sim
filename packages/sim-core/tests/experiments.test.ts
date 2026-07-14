@@ -64,7 +64,12 @@ describe("paired algorithm experiments", () => {
     const baseline = createNominalScenario();
     baseline.durationS = 0.02;
     const before = structuredClone(baseline);
-    const options = { samplesPerVariant: 2, seed: 901 } as const;
+    const progress: number[] = [];
+    const options = {
+      samplesPerVariant: 2,
+      seed: 901,
+      onProgress: (entry: { completed: number }) => progress.push(entry.completed)
+    } as const;
 
     const first = runAlgorithmComparison(baseline, options);
     const second = runAlgorithmComparison(baseline, options);
@@ -72,6 +77,7 @@ describe("paired algorithm experiments", () => {
     expect(second).toEqual(first);
     expect(baseline).toEqual(before);
     expect(first.trials).toHaveLength(ALGORITHM_VARIANTS.length * options.samplesPerVariant);
+    expect(progress.at(-1)).toBe(ALGORITHM_VARIANTS.length * options.samplesPerVariant);
     expect(first.variants.map((variant) => variant.algorithm)).toEqual(ALGORITHM_VARIANTS);
     for (const variant of first.variants) {
       expect(variant.runs).toBe(options.samplesPerVariant);

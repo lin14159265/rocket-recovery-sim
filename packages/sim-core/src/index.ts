@@ -10,3 +10,7 @@ export * from "./control";
 export * from "./plant";
 export * from "./metrics";
 export * from "./simulation";
+export * from "./experiments";
+export * from "./scenario-io";
+export * from "./validation";
+export * from "./traceability";

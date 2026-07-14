@@ -1,6 +1,6 @@
 {
   "name": "cz10b-net-recovery-lab",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "workspaces": [
@@ -15,7 +15,9 @@
     "test:watch": "vitest",
     "test:core": "vitest run packages/sim-core",
     "lab": "tsx tools/run-scenario.ts",
-    "lab:monte-carlo": "tsx tools/run-monte-carlo.ts"
+    "lab:monte-carlo": "tsx tools/run-monte-carlo.ts",
+    "lab:validate": "tsx tools/run-validation.ts",
+    "lab:sensitivity": "tsx tools/run-sensitivity.ts"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
@@ -27,4 +29,3 @@
     "node": ">=22"
   }
 }
-

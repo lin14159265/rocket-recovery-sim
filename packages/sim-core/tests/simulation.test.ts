@@ -32,6 +32,18 @@ describe("multi-rate recovery simulation", () => {
     ]));
   });
 
+  it("records the physical terminal snapshot when stopOnTerminal is enabled", () => {
+    const run = runSimulation(createNominalScenario(), {
+      frameRateHz: 2,
+      stopOnTerminal: true
+    });
+
+    expect(run.finalSnapshot.supervisorState).toBe("SECURED");
+    expect(run.metrics.secured).toBe(true);
+    expect(run.finalSnapshot.metrics.secured).toBe(true);
+    expect(run.frames.at(-1)).toEqual(run.finalSnapshot);
+  });
+
   it("is bit-repeatable for the same scenario and seed", () => {
     const first = runSimulation(createNominalScenario(), { frameRateHz: 2 });
     const second = runSimulation(createNominalScenario(), { frameRateHz: 2 });
@@ -42,6 +54,19 @@ describe("multi-rate recovery simulation", () => {
     expect(second.finalSnapshot.rocket).toEqual(first.finalSnapshot.rocket);
     expect(second.finalSnapshot.net).toEqual(first.finalSnapshot.net);
     expect(second.finalSnapshot.radioStats).toEqual(first.finalSnapshot.radioStats);
+  });
+
+  it("identifies the model version and exact configuration", () => {
+    const baseline = runSimulation(createNominalScenario(), { frameRateHz: 1 });
+    const changedConfig = createNominalScenario();
+    changedConfig.rocket.massKg += 1;
+    const changed = runSimulation(changedConfig, { frameRateHz: 1 });
+
+    expect(baseline.modelVersion).toMatch(/^0\.3\./);
+    expect(baseline.configFingerprint).toMatch(/^[0-9a-f]{8}$/);
+    expect(changed.configFingerprint).not.toBe(baseline.configFingerprint);
+    expect(baseline.finalSnapshot.runId).toContain(baseline.configFingerprint);
+    expect(baseline.finalSnapshot.runId).toContain(baseline.config.controller.algorithm);
   });
 
   it("cannot magically capture through a sustained radio blackout", () => {
@@ -71,4 +96,24 @@ describe("multi-rate recovery simulation", () => {
     expect(run.metrics.failed).toBe(true);
     expect(run.metrics.failureReason).toMatch(/winch unavailable/);
   });
+  it("records scenario-defined fault activation and clearing", () => {
+    const config = createNominalScenario();
+    config.durationS = 0.08;
+    config.faults.sensorBiasStep = {
+      enabled: true,
+      startTimeS: 0.01,
+      durationS: 0.02,
+      deltaM: [1, 0, 0]
+    };
+    const run = runSimulation(config, { frameRateHz: 20 });
+    const faultEvents = run.events.filter((event) =>
+      event.type === "FAULT_INJECTED" || event.type === "FAULT_CLEARED"
+    );
+    expect(faultEvents.map((event) => event.type)).toEqual([
+      "FAULT_INJECTED",
+      "FAULT_CLEARED"
+    ]);
+    expect(faultEvents[0]?.message).toMatch(/导航偏置阶跃/);
+  });
+
 });
