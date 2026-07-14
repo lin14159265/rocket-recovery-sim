@@ -1,0 +1,150 @@
++  config,
+   busy,
++  dirty,
++  onSeedChange,
++  onRerun,
++  onImportScenario,
++  importNotice,
++  onExportScenario,
++  onExportRun,
+   onRunMonteCarlo,
++  onRunValidation,
++  onCancelTask,
+   monteCarloSummary,
+-  busyMonteCarlo
+-}: Pick<InspectorProps, "run" | "busy" | "onRunMonteCarlo" | "monteCarloSummary" | "busyMonteCarlo">) {
+-  const [sampleCount, setSampleCount] = useState(50);
++  validationResult,
++  activeTask,
++  taskProgress
++}: Pick<
++  InspectorProps,
++  "run" | "config" | "busy" | "dirty" | "onSeedChange" | "onRerun" |
++  "onImportScenario" | "importNotice" | "onExportScenario" | "onExportRun" |
++  "onRunMonteCarlo" | "onRunValidation" | "onCancelTask" | "monteCarloSummary" |
++  "validationResult" | "activeTask" | "taskProgress"
++>) {
++  const [sampleCount, setSampleCount] = useState(5);
++  const fileInputRef = useRef<HTMLInputElement | null>(null);
+   const maxLoad = useMemo(() => {
+     if (monteCarloSummary === null || monteCarloSummary.variants.length === 0) return 1;
+-    return Math.max(1, ...monteCarloSummary.variants.map((variant) => variant.p95PeakLoadG));
++    return Math.max(1, ...monteCarloSummary.variants.map((variant) => variant.p95PeakLoadKn));
+   }, [monteCarloSummary]);
++  const taskBusy = activeTask !== null;
+ 
+   return (
+     <div className="inspector-scroll">
+       <section className="inspector-section">
+-        <div className="inspector-heading">
+-          <div><h2>单场景结果</h2><p>取完整运行的最终指标，不用当前帧冒充结果。</p></div>
++        <div className="inspector-heading"><div><h2>可重复运行与场景文件</h2><p>同一配置、模型版本与 seed 应得到逐位一致的结果。</p></div></div>
++        <div className="reproducibility-box">
++          <label><span>实验 seed</span><input type="number" step={1} value={config.seed} disabled={busy || taskBusy} onChange={(event) => { const value = event.currentTarget.valueAsNumber; if (Number.isSafeInteger(value)) onSeedChange(value); }} /></label>
++          <button type="button" disabled={busy || taskBusy} onClick={onRerun}>{busy ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />}{dirty ? "应用参数并重算" : "按相同配置重算"}</button>
+         </div>
+-        {run === null ? (
+-          <div className="inline-empty">尚未运行单场景</div>
+-        ) : (
+-          <>
+-            <OutcomeBadge run={run} />
+-            <div className="stat-grid experiment-stat-grid">
+-              <div><span>最小错位</span><strong>{formatNumber(run.metrics.missDistanceM, 2)} <small>m</small></strong></div>
+-              <div><span>捕获相对速度</span><strong>{formatNumber(run.metrics.captureRelativeSpeedMps, 2)} <small>m/s</small></strong></div>
+-              <div><span>峰值接触力</span><strong>{formatNumber(run.metrics.peakContactForceN / 1_000, 0)} <small>kN</small></strong></div>
+-              <div><span>峰值载荷</span><strong>{formatNumber(run.metrics.peakApparentLoadG, 2)} <small>g</small></strong></div>
+-              <div><span>峰值绳张力</span><strong>{formatNumber(run.metrics.peakRopeTensionN / 1_000, 0)} <small>kN</small></strong></div>
+-              <div><span>最大估计误差</span><strong>{formatNumber(run.metrics.maxEstimateErrorM, 2)} <small>m</small></strong></div>
+-            </div>
+-          </>
+-        )}
++        <div className="export-actions export-actions--three">
++          <input ref={fileInputRef} className="sr-only" type="file" accept="application/json,.json" onChange={(event) => { const file = event.currentTarget.files?.[0]; if (file !== undefined) onImportScenario(file); event.currentTarget.value = ""; }} />
++          <button type="button" disabled={busy || taskBusy} onClick={() => fileInputRef.current?.click()}><Upload size={15} />导入场景</button>
++          <button type="button" disabled={busy || taskBusy} onClick={onExportScenario}><Download size={15} />导出场景</button>
++          <button type="button" disabled={busy || taskBusy || run === null} onClick={onExportRun}><Download size={15} />导出结果</button>
++        </div>
++        {importNotice === null ? null : <div className="inline-notice">{importNotice}</div>}
++        <p className="reproducibility-note">导入器支持 v1 原始配置、v0.2 文档包和当前 v2 文档包；高于当前版本的文件会被拒绝。</p>
+       </section>
+ 
+       <section className="inspector-section">
+-        <div className="inspector-heading">
+-          <div><h2>Monte Carlo 对照</h2><p>比较固定网、α-β 与预测协同的捕获率和载荷代价。</p></div>
+-        </div>
+-        <div className="monte-carlo-controls">
+-          <label>
+-            <span>样本数</span>
+-            <select value={sampleCount} onChange={(event) => setSampleCount(Number(event.currentTarget.value))} disabled={busy || busyMonteCarlo}>
+-              <option value={20}>20</option>
+-              <option value={50}>50</option>
+-              <option value={100}>100</option>
+-              <option value={200}>200</option>
+-            </select>
+-          </label>
+-          <button
+-            type="button"
+-            disabled={onRunMonteCarlo === undefined || busy || busyMonteCarlo}
+-            onClick={() => onRunMonteCarlo?.(sampleCount)}
+-          >
+-            {busyMonteCarlo ? <LoaderCircle className="spin" size={17} /> : <PlayCircle size={17} />}
+-            {busyMonteCarlo ? "批量计算中" : "运行对照"}
+-          </button>
+-        </div>
+-        {monteCarloSummary === null ? (
+-          <div className="inline-empty">
+-            <strong>尚未运行</strong>
+-            <span>{onRunMonteCarlo === undefined ? "批量试验入口尚未接入" : "选择样本数后启动闭环模式对照"}</span>
+-          </div>
+-        ) : (
+-          <div className="comparison-list" aria-label={`${monteCarloSummary.sampleCount} 次 Monte Carlo 汇总`}>
+-            {monteCarloSummary.variants.map((variant) => (
+-              <article className="comparison-row" key={variant.id}>
+-                <div className="comparison-title">
+-                  <strong>{variant.label}</strong>
+-                  <span>{variant.captures}/{variant.runs} 捕获</span>
+-                </div>
+-                <div className="comparison-measure">
+-                  <span>捕获率</span>
+-                  <div><i style={{ width: `${Math.max(0, Math.min(100, variant.captureRate * 100))}%` }} /></div>
+-                  <strong>{(variant.captureRate * 100).toFixed(1)}%</strong>
+-                </div>
+-                <div className="comparison-measure comparison-measure--load">
+-                  <span>P95 载荷</span>
+-                  <div><i style={{ width: `${Math.max(0, Math.min(100, variant.p95PeakLoadG / maxLoad * 100))}%` }} /></div>
+-                  <strong>{variant.p95PeakLoadG.toFixed(2)} g</strong>
+-                </div>
+-                <small>均值 {variant.meanPeakLoadG.toFixed(2)} g · {variant.algorithm}</small>
+-              </article>
+-            ))}
+-          </div>
+-        )}
++        <div className="inspector-heading"><div><h2>单场景结果</h2><p>取完整运行的最终指标，不用当前帧冒充结果。</p></div></div>
++        {dirty && run !== null ? <div className="inline-warning">当前显示的是上一次已运行配置的结果；应用参数并重算后才会更新。</div> : null}
++        {run === null ? <div className="inline-empty">尚未运行单场景</div> : <><OutcomeBadge run={run} /><div className="stat-grid experiment-stat-grid"><div><span>最小错位</span><strong>{formatNumber(run.metrics.missDistanceM, 2)} <small>m</small></strong></div><div><span>捕获相对速度</span><strong>{formatNumber(run.metrics.captureRelativeSpeedMps, 2)} <small>m/s</small></strong></div><div><span>峰值接触力</span><strong>{formatNumber(run.metrics.peakContactForceN / 1_000, 0)} <small>kN</small></strong></div><div><span>峰值载荷</span><strong>{formatNumber(run.metrics.peakApparentLoadG, 2)} <small>g</small></strong></div><div><span>峰值绳张力</span><strong>{formatNumber(run.metrics.peakRopeTensionN / 1_000, 0)} <small>kN</small></strong></div><div><span>最大估计误差</span><strong>{formatNumber(run.metrics.maxEstimateErrorM, 2)} <small>m</small></strong></div></div></>}
++      </section>
++
++      <section className="inspector-section">
++        <div className="inspector-heading"><div><h2>有界扰动对照</h2><p>每种算法使用同一组扰动；批量进度按每个实际运行回传。</p></div></div>
++        <div className="monte-carlo-controls"><label><span>样本数</span><select value={sampleCount} onChange={(event) => setSampleCount(Number(event.currentTarget.value))} disabled={busy || taskBusy}><option value={3}>3</option><option value={5}>5</option><option value={10}>10</option><option value={20}>20</option></select></label><button type="button" className={activeTask === "comparison" ? "is-cancel" : ""} disabled={busy || (taskBusy && activeTask !== "comparison") || (activeTask === "comparison" ? onCancelTask === undefined : onRunMonteCarlo === undefined)} onClick={() => activeTask === "comparison" ? onCancelTask?.() : onRunMonteCarlo?.(sampleCount)}>{activeTask === "comparison" ? <Square size={15} fill="currentColor" /> : <PlayCircle size={17} />}{activeTask === "comparison" ? "取消对照" : "运行对照"}</button></div>
++        {activeTask === "comparison" && taskProgress !== null ? <ProgressBlock progress={taskProgress} onCancel={onCancelTask} /> : null}
++        {monteCarloSummary === null ? <div className="inline-empty"><strong>尚未运行</strong><span>选择样本数后启动成对扰动闭环模式对照</span></div> : <div className="comparison-list" aria-label={`${monteCarloSummary.sampleCount} 次 Monte Carlo 汇总`}>{monteCarloSummary.variants.map((variant) => <article className="comparison-row" key={variant.id}><div className="comparison-title"><strong>{variant.label}</strong><span>{variant.secured}/{variant.runs} 稳定 · {variant.captures} 捕获</span></div><div className="comparison-measure"><span>稳定率</span><div><i style={{ width: `${Math.max(0, Math.min(100, variant.securedRate * 100))}%` }} /></div><strong>{(variant.securedRate * 100).toFixed(1)}%</strong></div><div className="comparison-measure comparison-measure--load"><span>P95 接触力</span><div><i style={{ width: `${Math.max(0, Math.min(100, variant.p95PeakLoadKn / maxLoad * 100))}%` }} /></div><strong>{variant.p95PeakLoadKn.toFixed(0)} kN</strong></div><small>捕获率 {(variant.captureRate * 100).toFixed(1)}% · 接触力均值 {variant.meanPeakLoadKn.toFixed(0)} kN · {variant.algorithm}</small></article>)}</div>}
+       </section>
+ 
+       <section className="inspector-section">
+-        <div className="inspector-heading"><div><h2>事件证据</h2><p>最近的状态切换、接触与故障事件。</p></div></div>
+-        {run === null || run.events.length === 0 ? (
+-          <div className="inline-empty">暂无事件</div>
+-        ) : (
+-          <ol className="event-list">
+-            {run.events.slice(-8).map((event, index) => (
+-              <li key={`${event.tick}-${event.type}-${index}`} className={`event-${event.severity}`}>
+-                <time>{(event.tick * run.config.physicsDtS).toFixed(2)} s</time>
+-                <span><strong>{event.type}</strong>{event.message}</span>
+-              </li>
+-            ))}
+-          </ol>
+-        )}
++        <div className="inspector-heading"><div><h2>数值验证</h2><p>用 Δt、Δt/2、Δt/4 检查步长收敛，并建立接触阶段代理能量账本。</p></div></div>
++        <button className="wide-action" type="button" disabled={busy || (taskBusy && activeTask !== "validation") || onRunValidation === undefined} onClick={() => activeTask === "validation" ? onCancelTask?.() : onRunValidation?.()}>{activeTask === "validation" ? <Square size={15} fill="currentColor" /> : <PlayCircle size={17} />}{activeTask === "validation" ? "取消验证" : "运行收敛与能量验证"}</button>
++        {activeTask === "validation" && taskProgress !== null ? <ProgressBlock progress={taskProgress} onCancel={onCancelTask} /> : null}
