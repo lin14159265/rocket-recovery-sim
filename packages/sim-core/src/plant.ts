@@ -15,6 +15,7 @@ import {
   clamp,
   clampMagnitude3,
   cross3,
+  dot3,
   integrateQuaternion,
   norm3,
   quatRotate,
@@ -78,6 +79,29 @@ export interface PlantAppliedForces {
   totalN: Vec3;
 }
 
+/** Per-physics-tick work terms used to build the validation ledger. */
+export interface PlantStepEnergy {
+  contactActive: boolean;
+  translationalKineticBeforeJ: number;
+  translationalKineticAfterJ: number;
+  relativeKineticBeforeJ: number;
+  relativeKineticAfterJ: number;
+  rotationalKineticBeforeJ: number;
+  rotationalKineticAfterJ: number;
+  gravitationalPotentialBeforeJ: number;
+  gravitationalPotentialAfterJ: number;
+  gravityWorkJ: number;
+  thrustWorkJ: number;
+  aerodynamicWorkJ: number;
+  contactWorkOnRocketJ: number;
+  controlTorqueWorkJ: number;
+  relativeContactWorkExtractedJ: number;
+  platformBoundaryWorkJ: number;
+  contactDampingDissipationJ: number;
+  elasticStorageBeforeJ: number;
+  elasticStorageAfterJ: number;
+}
+
 /** Truth and transition information after one fixed-size physics tick. */
 export interface PlantStepResult {
   tick: number;
@@ -88,6 +112,7 @@ export interface PlantStepResult {
   gustMps: Vec3;
   windMps: Vec3;
   forces: PlantAppliedForces;
+  energy: PlantStepEnergy;
   capture: CaptureEvaluation;
   capturedThisStep: boolean;
   missedThisStep: boolean;
@@ -132,6 +157,28 @@ const ZERO_FORCES: PlantAppliedForces = {
   aerodynamicDragN: [0, 0, 0],
   contactN: [0, 0, 0],
   totalN: [0, 0, 0]
+};
+
+const ZERO_ENERGY: PlantStepEnergy = {
+  contactActive: false,
+  translationalKineticBeforeJ: 0,
+  translationalKineticAfterJ: 0,
+  relativeKineticBeforeJ: 0,
+  relativeKineticAfterJ: 0,
+  rotationalKineticBeforeJ: 0,
+  rotationalKineticAfterJ: 0,
+  gravitationalPotentialBeforeJ: 0,
+  gravitationalPotentialAfterJ: 0,
+  gravityWorkJ: 0,
+  thrustWorkJ: 0,
+  aerodynamicWorkJ: 0,
+  contactWorkOnRocketJ: 0,
+  controlTorqueWorkJ: 0,
+  relativeContactWorkExtractedJ: 0,
+  platformBoundaryWorkJ: 0,
+  contactDampingDissipationJ: 0,
+  elasticStorageBeforeJ: 0,
+  elasticStorageAfterJ: 0
 };
 
 const cloneAxis = (axis: AxisActuatorState): AxisActuatorState => ({ ...axis });
@@ -307,6 +354,7 @@ export class RecoveryPlant {
     this.lastResult = this.makeResult(
       NO_CAPTURE,
       ZERO_FORCES,
+      ZERO_ENERGY,
       false,
       false,
       false,
@@ -337,6 +385,11 @@ export class RecoveryPlant {
     this.updateRocketActuators(input.rocketControl, dtS);
     this.updateWinchActuators(input, dtS);
 
+    const rocketBefore = cloneRocket(this.rocket);
+    const platformBefore = { ...clonePlatform(this.platform),
+      rollRateRadps: this.platform.rollRateRadps,
+      pitchRateRadps: this.platform.pitchRateRadps
+    };
     const localBefore = this.toPlatformKinematics(this.rocket, this.platform);
     const contact = this.hasIntactCapture() ? this.computeContact(localBefore) : zeroContact();
     let ropeBrokenThisStep = false;
@@ -366,6 +419,17 @@ export class RecoveryPlant {
     this.tick += 1;
     const nextPlatform = this.evaluatePlatform(this.currentTimeS);
     const localAfter = this.toPlatformKinematics(this.rocket, nextPlatform);
+    const energy = this.computeStepEnergy(
+      rocketBefore,
+      this.rocket,
+      platformBefore,
+      nextPlatform,
+      localBefore,
+      localAfter,
+      contact,
+      forces,
+      dtS
+    );
 
     let capture = NO_CAPTURE;
     let capturedThisStep = false;
@@ -396,6 +460,7 @@ export class RecoveryPlant {
     this.lastResult = this.makeResult(
       capture,
       forces,
+      energy,
       capturedThisStep,
       missedThisStep,
       ropeBrokenThisStep,
@@ -403,6 +468,85 @@ export class RecoveryPlant {
       failureReason
     );
     return this.cloneResult(this.lastResult);
+  }
+
+  private computeStepEnergy(
+    before: RocketTruthState,
+    after: RocketTruthState,
+    platformBefore: PlatformMotion,
+    platformAfter: PlatformMotion,
+    localBefore: LocalKinematics,
+    localAfter: LocalKinematics,
+    contact: ContactComputation,
+    forces: PlantAppliedForces,
+    dtS: number
+  ): PlantStepEnergy {
+    const averageVelocityMps: Vec3 = [
+      (before.velocityMps[0] + after.velocityMps[0]) / 2,
+      (before.velocityMps[1] + after.velocityMps[1]) / 2,
+      (before.velocityMps[2] + after.velocityMps[2]) / 2
+    ];
+    const averageAngularVelocityRadps: Vec3 = [
+      (before.angularVelocityRadps[0] + after.angularVelocityRadps[0]) / 2,
+      (before.angularVelocityRadps[1] + after.angularVelocityRadps[1]) / 2,
+      (before.angularVelocityRadps[2] + after.angularVelocityRadps[2]) / 2
+    ];
+    const averageLocalVelocityMps: Vec3 = [
+      (localBefore.velocityMps[0] + localAfter.velocityMps[0]) / 2,
+      (localBefore.velocityMps[1] + localAfter.velocityMps[1]) / 2,
+      (localBefore.velocityMps[2] + localAfter.velocityMps[2]) / 2
+    ];
+    const translationalKinetic = (rocket: RocketTruthState): number =>
+      0.5 * rocket.massKg * dot3(rocket.velocityMps, rocket.velocityMps);
+    const rotationalKinetic = (rocket: RocketTruthState): number =>
+      0.5 * (
+        this.config.rocket.inertiaKgM2[0] * rocket.angularVelocityRadps[0] ** 2 +
+        this.config.rocket.inertiaKgM2[1] * rocket.angularVelocityRadps[1] ** 2 +
+        this.config.rocket.inertiaKgM2[2] * rocket.angularVelocityRadps[2] ** 2
+      );
+    const elasticStorage = (local: LocalKinematics): number => {
+      const payoutM = Math.max(0, this.config.platform.capturePlaneZ - local.positionM[2]);
+      const lateralX = local.positionM[0] - this.net.centerM[0];
+      const lateralY = local.positionM[1] - this.net.centerM[1];
+      return 0.5 * this.config.net.totalStiffnessNpm * payoutM ** 2 +
+        0.5 * this.config.net.lateralStiffnessNpm * (lateralX ** 2 + lateralY ** 2);
+    };
+    const contactActive = norm3(contact.forceWorldN) > 1e-9 || this.hasIntactCapture();
+    const relativeContactWorkExtractedJ = contactActive
+      ? -dot3(contact.forceLocalN, averageLocalVelocityMps) * dtS
+      : 0;
+    const verticalDampingJ = contact.forceLocalN[2] > 0
+      ? this.config.net.totalDampingNspm * contact.payoutVelocityMps ** 2 * dtS
+      : 0;
+    const lateralDampingJ = contactActive
+      ? this.config.net.lateralDampingNspm * (
+          averageLocalVelocityMps[0] ** 2 + averageLocalVelocityMps[1] ** 2
+        ) * dtS
+      : 0;
+    const contactWorkOnRocketJ = dot3(forces.contactN, averageVelocityMps) * dtS;
+    return {
+      contactActive,
+      translationalKineticBeforeJ: translationalKinetic(before),
+      translationalKineticAfterJ: translationalKinetic(after),
+      relativeKineticBeforeJ: 0.5 * before.massKg * dot3(localBefore.velocityMps, localBefore.velocityMps),
+      relativeKineticAfterJ: 0.5 * after.massKg * dot3(localAfter.velocityMps, localAfter.velocityMps),
+      rotationalKineticBeforeJ: rotationalKinetic(before),
+      rotationalKineticAfterJ: rotationalKinetic(after),
+      gravitationalPotentialBeforeJ:
+        before.massKg * this.config.environment.gravityMps2 * before.positionM[2],
+      gravitationalPotentialAfterJ:
+        after.massKg * this.config.environment.gravityMps2 * after.positionM[2],
+      gravityWorkJ: dot3(forces.gravityN, averageVelocityMps) * dtS,
+      thrustWorkJ: dot3(forces.thrustN, averageVelocityMps) * dtS,
+      aerodynamicWorkJ: dot3(forces.aerodynamicDragN, averageVelocityMps) * dtS,
+      contactWorkOnRocketJ,
+      controlTorqueWorkJ: dot3(after.actualTorqueNm, averageAngularVelocityRadps) * dtS,
+      relativeContactWorkExtractedJ,
+      platformBoundaryWorkJ: contactWorkOnRocketJ + relativeContactWorkExtractedJ,
+      contactDampingDissipationJ: verticalDampingJ + lateralDampingJ,
+      elasticStorageBeforeJ: contactActive ? elasticStorage(localBefore) : 0,
+      elasticStorageAfterJ: contactActive ? elasticStorage(localAfter) : 0
+    };
   }
 
   private validateInput(input: PlantStepInput): void {
@@ -882,6 +1026,7 @@ export class RecoveryPlant {
   private makeResult(
     capture: CaptureEvaluation,
     forces: PlantAppliedForces,
+    energy: PlantStepEnergy,
     capturedThisStep: boolean,
     missedThisStep: boolean,
     ropeBrokenThisStep: boolean,
@@ -898,6 +1043,7 @@ export class RecoveryPlant {
       gustMps: [...this.gustMps],
       windMps,
       forces: cloneForces(forces),
+      energy: { ...energy },
       capture: cloneCapture(capture),
       capturedThisStep,
       missedThisStep,
@@ -916,6 +1062,7 @@ export class RecoveryPlant {
       gustMps: [...result.gustMps],
       windMps: [...result.windMps],
       forces: cloneForces(result.forces),
+      energy: { ...result.energy },
       capture: cloneCapture(result.capture)
     };
   }

@@ -337,6 +337,34 @@ export interface RecoveryMetrics {
   maxEstimateErrorM: number;
 }
 
+/** Physics-tick work and storage ledger for the contact phase. */
+export interface SimulationEnergyLedger {
+  contactDetected: boolean;
+  startTick: number | null;
+  startTimeS: number | null;
+  endTick: number;
+  endTimeS: number;
+  physicsStepCount: number;
+  initialTranslationalKineticJ: number;
+  finalTranslationalKineticJ: number;
+  initialRelativeKineticJ: number;
+  finalRelativeKineticJ: number;
+  initialRotationalKineticJ: number;
+  finalRotationalKineticJ: number;
+  initialGravitationalPotentialJ: number;
+  finalGravitationalPotentialJ: number;
+  gravityWorkJ: number;
+  thrustWorkJ: number;
+  aerodynamicWorkJ: number;
+  contactWorkOnRocketJ: number;
+  controlTorqueWorkJ: number;
+  relativeContactWorkExtractedJ: number;
+  platformBoundaryWorkJ: number;
+  contactDampingDissipationJ: number;
+  initialElasticStorageJ: number;
+  finalElasticStorageJ: number;
+}
+
 export interface DomainEvent {
   tick: number;
   type: string;
@@ -387,6 +415,7 @@ export interface SimulationRun {
   frames: SimulationSnapshot[];
   telemetry: TelemetrySample[];
   events: DomainEvent[];
+  energyLedger: SimulationEnergyLedger;
   finalSnapshot: SimulationSnapshot;
   metrics: RecoveryMetrics;
 }

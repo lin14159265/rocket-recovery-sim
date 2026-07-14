@@ -1,4 +1,4 @@
-import type { ScenarioConfig } from "./contracts";
+import type { ParameterSource, ScenarioConfig } from "./contracts";
 import { createNominalScenario, fingerprintScenarioConfig } from "./config";
 import { SIMULATION_MODEL_VERSION } from "./simulation";
 
@@ -40,10 +40,28 @@ const positive = (value: unknown, label: string): number => {
   return result;
 };
 
+const nonNegative = (value: unknown, label: string): number => {
+  const result = finite(value, label);
+  if (result < 0) throw new RangeError(`${label} 不得小于 0`);
+  return result;
+};
+
 const probability = (value: unknown, label: string): number => {
   const result = finite(value, label);
   if (result < 0 || result > 1) throw new RangeError(`${label} 必须位于 [0, 1]`);
   return result;
+};
+
+const ensureBoolean = (value: unknown, label: string): boolean => {
+  if (typeof value !== "boolean") throw new TypeError(`${label} 必须是布尔值`);
+  return value;
+};
+
+const ensureString = (value: unknown, label: string, allowEmpty = false): string => {
+  if (typeof value !== "string" || (!allowEmpty && value.trim().length === 0)) {
+    throw new TypeError(`${label} 必须是${allowEmpty ? "" : "非空"}字符串`);
+  }
+  return value;
 };
 
 const mergeRecord = <T extends Record<string, unknown>>(baseline: T, value: unknown): T => {
@@ -60,9 +78,70 @@ const mergeRecord = <T extends Record<string, unknown>>(baseline: T, value: unkn
   return output;
 };
 
+const assertParameterSources = (value: unknown, label: string): void => {
+  if (!isRecord(value)) throw new TypeError(`${label} 必须是对象`);
+  for (const [path, rawSource] of Object.entries(value)) {
+    if (path.trim().length === 0) throw new TypeError(`${label} 不得包含空路径`);
+    if (!isRecord(rawSource)) throw new TypeError(`${label}.${path} 必须是对象`);
+    if (!["official", "public-estimate", "assumed", "calibrated"].includes(
+      String(rawSource.status)
+    )) {
+      throw new RangeError(`${label}.${path}.status 不是受支持的来源等级`);
+    }
+    ensureString(rawSource.source, `${label}.${path}.source`);
+    ensureString(rawSource.note, `${label}.${path}.note`, true);
+    const allowed = new Set(["status", "source", "note"]);
+    for (const key of Object.keys(rawSource)) {
+      if (!allowed.has(key)) throw new TypeError(`${label}.${path} 包含未知字段 ${key}`);
+    }
+  }
+};
+
+/**
+ * Enforces the complete schema shape for current-version documents. Legacy
+ * documents are upgraded first, then pass through the same strict check.
+ */
+const assertCompleteShape = (value: unknown, baseline: unknown, label: string): void => {
+  if (label === "config.parameterSources") {
+    assertParameterSources(value, label);
+    return;
+  }
+  if (Array.isArray(baseline)) {
+    if (!Array.isArray(value) || value.length !== baseline.length) {
+      throw new TypeError(`${label} 必须是长度为 ${baseline.length} 的数组`);
+    }
+    for (let index = 0; index < baseline.length; index += 1) {
+      assertCompleteShape(value[index], baseline[index], `${label}[${index}]`);
+    }
+    return;
+  }
+  if (isRecord(baseline)) {
+    if (!isRecord(value)) throw new TypeError(`${label} 必须是对象`);
+    const required = new Set(Object.keys(baseline));
+    for (const key of required) {
+      if (!(key in value)) throw new TypeError(`${label} 缺少必填字段 ${key}`);
+      assertCompleteShape(value[key], baseline[key], `${label}.${key}`);
+    }
+    for (const key of Object.keys(value)) {
+      if (!required.has(key)) throw new TypeError(`${label} 包含未知字段 ${key}`);
+    }
+    return;
+  }
+  if (typeof baseline === "number") {
+    finite(value, label);
+  } else if (typeof baseline === "string") {
+    ensureString(value, label, label.endsWith(".description") || label.endsWith(".note"));
+  } else if (typeof baseline === "boolean") {
+    ensureBoolean(value, label);
+  } else if (value !== baseline) {
+    throw new TypeError(`${label} 类型不正确`);
+  }
+};
+
 interface ExtractedScenario {
   candidate: Record<string, unknown>;
   sourceDocumentVersion: number | null;
+  sourceFingerprint: string | null;
 }
 
 const extractConfigCandidate = (input: unknown): ExtractedScenario => {
@@ -81,20 +160,12 @@ const extractConfigCandidate = (input: unknown): ExtractedScenario => {
       throw new RangeError(`场景 documentVersion=${sourceDocumentVersion} 高于当前支持的 2`);
     }
     if (!isRecord(input.config)) throw new TypeError("场景文档缺少 config 对象");
-    return { candidate: input.config, sourceDocumentVersion };
+    const sourceFingerprint = input.configFingerprint === undefined
+      ? null
+      : ensureString(input.configFingerprint, "configFingerprint");
+    return { candidate: input.config, sourceDocumentVersion, sourceFingerprint };
   }
-  return { candidate: input, sourceDocumentVersion: null };
-};
-
-const ensureBoolean = (value: unknown, label: string): boolean => {
-  if (typeof value !== "boolean") throw new TypeError(`${label} 必须是布尔值`);
-  return value;
-};
-
-const nonNegative = (value: unknown, label: string): number => {
-  const result = finite(value, label);
-  if (result < 0) throw new RangeError(`${label} 不得小于 0`);
-  return result;
+  return { candidate: input, sourceDocumentVersion: null, sourceFingerprint: null };
 };
 
 const finiteVector3 = (value: unknown, label: string): [number, number, number] => {
@@ -108,6 +179,22 @@ const finiteVector3 = (value: unknown, label: string): [number, number, number] 
   ];
 };
 
+const finiteQuaternion = (value: unknown, label: string): [number, number, number, number] => {
+  if (!Array.isArray(value) || value.length !== 4) {
+    throw new TypeError(`${label} 必须是长度为 4 的数值数组`);
+  }
+  const result: [number, number, number, number] = [
+    finite(value[0], `${label}[0]`),
+    finite(value[1], `${label}[1]`),
+    finite(value[2], `${label}[2]`),
+    finite(value[3], `${label}[3]`)
+  ];
+  const magnitude = Math.hypot(...result);
+  if (magnitude < 1e-9) throw new RangeError(`${label} 不得为零四元数`);
+  if (Math.abs(magnitude - 1) > 1e-3) throw new RangeError(`${label} 必须归一化`);
+  return result;
+};
+
 const validateLink = (link: ScenarioConfig["radio"], label: string): void => {
   nonNegative(link.baseLatencyMs, `${label}.baseLatencyMs`);
   nonNegative(link.jitterMs, `${label}.jitterMs`);
@@ -117,43 +204,112 @@ const validateLink = (link: ScenarioConfig["radio"], label: string): void => {
   positive(link.bandwidthPacketsPerSecond, `${label}.bandwidthPacketsPerSecond`);
 };
 
-const validateScenario = (config: ScenarioConfig): void => {
-  if (typeof config.id !== "string" || config.id.trim().length === 0) {
-    throw new TypeError("id 必须是非空字符串");
+const validateRate = (rateHz: number, physicsDtS: number, label: string): void => {
+  positive(rateHz, label);
+  const rawTicks = 1 / (rateHz * physicsDtS);
+  const roundedTicks = Math.round(rawTicks);
+  if (roundedTicks < 1 || Math.abs(rawTicks - roundedTicks) > 1e-8) {
+    throw new RangeError(`${label} 必须整除物理 tick 频率`);
   }
-  if (typeof config.name !== "string" || config.name.trim().length === 0) {
-    throw new TypeError("name 必须是非空字符串");
+};
+
+export const validateScenarioConfig = (config: ScenarioConfig): void => {
+  const baseline = createNominalScenario();
+  assertCompleteShape(config, baseline, "config");
+
+  if (config.schemaVersion !== CURRENT_SCENARIO_SCHEMA_VERSION) {
+    throw new RangeError(`schemaVersion 必须为 ${CURRENT_SCENARIO_SCHEMA_VERSION}`);
   }
+  ensureString(config.id, "id");
+  ensureString(config.name, "name");
+  ensureString(config.description, "description", true);
   if (!Number.isSafeInteger(config.seed)) throw new RangeError("seed 必须是安全整数");
   positive(config.durationS, "durationS");
   positive(config.physicsDtS, "physicsDtS");
-  if (config.physicsDtS > config.durationS) {
-    throw new RangeError("physicsDtS 不得大于 durationS");
+  if (config.physicsDtS > config.durationS) throw new RangeError("physicsDtS 不得大于 durationS");
+  const durationTicks = config.durationS / config.physicsDtS;
+  if (Math.abs(durationTicks - Math.round(durationTicks)) > 1e-8) {
+    throw new RangeError("durationS 必须由整数个 physicsDtS 组成");
   }
 
   positive(config.rocket.massKg, "rocket.massKg");
-  positive(config.rocket.thrustMaxN, "rocket.thrustMaxN");
+  positive(config.rocket.lengthM, "rocket.lengthM");
+  positive(config.rocket.radiusM, "rocket.radiusM");
+  finiteVector3(config.rocket.inertiaKgM2, "rocket.inertiaKgM2").forEach((entry, index) =>
+    positive(entry, `rocket.inertiaKgM2[${index}]`)
+  );
   finiteVector3(config.rocket.initialPositionM, "rocket.initialPositionM");
   finiteVector3(config.rocket.initialVelocityMps, "rocket.initialVelocityMps");
+  finiteQuaternion(config.rocket.initialAttitudeWxyz, "rocket.initialAttitudeWxyz");
+  finiteVector3(config.rocket.initialAngularVelocityRadps, "rocket.initialAngularVelocityRadps");
+  nonNegative(config.rocket.thrustMaxN, "rocket.thrustMaxN");
+  positive(config.rocket.thrustTimeConstantS, "rocket.thrustTimeConstantS");
+  nonNegative(config.rocket.torqueMaxNm, "rocket.torqueMaxNm");
+  positive(config.rocket.attitudeTimeConstantS, "rocket.attitudeTimeConstantS");
+  nonNegative(config.rocket.dragCoefficient, "rocket.dragCoefficient");
+  positive(config.rocket.referenceAreaM2, "rocket.referenceAreaM2");
+  positive(config.rocket.lateralAccelerationLimitMps2, "rocket.lateralAccelerationLimitMps2");
+
+  finite(config.platform.capturePlaneZ, "platform.capturePlaneZ");
+  positive(config.platform.frameHalfWidthM, "platform.frameHalfWidthM");
+  positive(config.platform.frameHalfDepthM, "platform.frameHalfDepthM");
+  positive(config.platform.frameHeightM, "platform.frameHeightM");
+  nonNegative(config.platform.surgeAmplitudeM, "platform.surgeAmplitudeM");
+  nonNegative(config.platform.swayAmplitudeM, "platform.swayAmplitudeM");
+  nonNegative(config.platform.heaveAmplitudeM, "platform.heaveAmplitudeM");
+  nonNegative(config.platform.rollAmplitudeRad, "platform.rollAmplitudeRad");
+  nonNegative(config.platform.pitchAmplitudeRad, "platform.pitchAmplitudeRad");
+  positive(config.platform.wavePeriodS, "platform.wavePeriodS");
+
   positive(config.net.openHalfSpacingM, "net.openHalfSpacingM");
   nonNegative(config.net.closedHalfSpacingM, "net.closedHalfSpacingM");
   if (config.net.closedHalfSpacingM >= config.net.openHalfSpacingM) {
     throw new RangeError("net.closedHalfSpacingM 必须小于 net.openHalfSpacingM");
   }
+  positive(config.net.closureDurationS, "net.closureDurationS");
+  nonNegative(config.net.centerTravelLimitM, "net.centerTravelLimitM");
   positive(config.net.totalStiffnessNpm, "net.totalStiffnessNpm");
   positive(config.net.totalDampingNspm, "net.totalDampingNspm");
+  positive(config.net.lateralStiffnessNpm, "net.lateralStiffnessNpm");
+  positive(config.net.lateralDampingNspm, "net.lateralDampingNspm");
   positive(config.net.totalStrengthLimitN, "net.totalStrengthLimitN");
-  positive(config.sensors.sensorRateHz, "sensors.sensorRateHz");
+  positive(config.net.arrestDistanceM, "net.arrestDistanceM");
+  positive(config.net.winchMaxSpeedMps, "net.winchMaxSpeedMps");
+  positive(config.net.winchMaxAccelerationMps2, "net.winchMaxAccelerationMps2");
+  positive(config.net.winchTimeConstantS, "net.winchTimeConstantS");
+
+  positive(config.environment.gravityMps2, "environment.gravityMps2");
+  nonNegative(config.environment.airDensityKgpm3, "environment.airDensityKgpm3");
+  finiteVector3(config.environment.meanWindMps, "environment.meanWindMps");
+  nonNegative(config.environment.gustSigmaMps, "environment.gustSigmaMps");
+  nonNegative(config.environment.gustTimeConstantS, "environment.gustTimeConstantS");
+
   nonNegative(config.sensors.rocketPositionNoiseM, "sensors.rocketPositionNoiseM");
+  nonNegative(config.sensors.rocketVelocityNoiseMps, "sensors.rocketVelocityNoiseMps");
+  nonNegative(config.sensors.groundPositionNoiseM, "sensors.groundPositionNoiseM");
+  nonNegative(config.sensors.groundVelocityNoiseMps, "sensors.groundVelocityNoiseMps");
   finiteVector3(config.sensors.positionBiasM, "sensors.positionBiasM");
+  validateRate(config.sensors.sensorRateHz, config.physicsDtS, "sensors.sensorRateHz");
 
   if (!["fixed", "alpha-beta", "predictive"].includes(config.controller.algorithm)) {
     throw new RangeError("controller.algorithm 不是受支持的算法模式");
   }
-  positive(config.controller.controlRateHz, "controller.controlRateHz");
-  positive(config.controller.telemetryRateHz, "controller.telemetryRateHz");
-  positive(config.controller.netControlRateHz, "controller.netControlRateHz");
+  validateRate(config.controller.controlRateHz, config.physicsDtS, "controller.controlRateHz");
+  validateRate(config.controller.telemetryRateHz, config.physicsDtS, "controller.telemetryRateHz");
+  validateRate(config.controller.netControlRateHz, config.physicsDtS, "controller.netControlRateHz");
+  nonNegative(config.controller.rocketPositionKp, "controller.rocketPositionKp");
+  nonNegative(config.controller.rocketVelocityKd, "controller.rocketVelocityKd");
+  nonNegative(config.controller.verticalVelocityKp, "controller.verticalVelocityKp");
+  nonNegative(config.controller.attitudeKp, "controller.attitudeKp");
+  nonNegative(config.controller.attitudeKd, "controller.attitudeKd");
+  nonNegative(config.controller.netCenterKp, "controller.netCenterKp");
+  nonNegative(config.controller.netCenterKd, "controller.netCenterKd");
+  positive(config.controller.maxCaptureSpeedMps, "controller.maxCaptureSpeedMps");
+  const maximumTilt = nonNegative(config.controller.maxCaptureTiltRad, "controller.maxCaptureTiltRad");
+  if (maximumTilt > Math.PI / 2) throw new RangeError("controller.maxCaptureTiltRad 不得超过 π/2");
+  nonNegative(config.controller.requiredApertureMarginM, "controller.requiredApertureMarginM");
   positive(config.controller.staleTelemetryAbortS, "controller.staleTelemetryAbortS");
+
   validateLink(config.radio, "radio");
   validateLink(config.fieldbus, "fieldbus");
 
@@ -172,24 +328,28 @@ const validateScenario = (config: ScenarioConfig): void => {
   }
   finiteVector3(config.faults.sensorBiasStep.deltaM, "faults.sensorBiasStep.deltaM");
   probability(config.faults.thrustScale.scale, "faults.thrustScale.scale");
+  assertParameterSources(config.parameterSources, "parameterSources");
 };
 
 /** Creates the stable, versioned interchange envelope used by the browser. */
-export const createScenarioDocument = (config: ScenarioConfig): ScenarioDocument => ({
-  format: SCENARIO_DOCUMENT_FORMAT,
-  documentVersion: 2,
-  modelVersion: SIMULATION_MODEL_VERSION,
-  configFingerprint: fingerprintScenarioConfig(config),
-  notice: "公开机理代理模型场景，不是官方型号参数",
-  config: structuredClone(config)
-});
+export const createScenarioDocument = (config: ScenarioConfig): ScenarioDocument => {
+  validateScenarioConfig(config);
+  return {
+    format: SCENARIO_DOCUMENT_FORMAT,
+    documentVersion: 2,
+    modelVersion: SIMULATION_MODEL_VERSION,
+    configFingerprint: fingerprintScenarioConfig(config),
+    notice: "公开机理代理模型场景，不是官方型号参数",
+    config: structuredClone(config)
+  };
+};
 
 /** Accepts v1 raw configs, the v0.2 envelope, and the current v2 envelope. */
 export const migrateScenarioDocument = (input: unknown): ScenarioMigrationResult => {
-  const { candidate, sourceDocumentVersion } = extractConfigCandidate(input);
-  const sourceSchemaVersion = typeof candidate.schemaVersion === "number"
-    ? candidate.schemaVersion
-    : 1;
+  const { candidate, sourceDocumentVersion, sourceFingerprint } = extractConfigCandidate(input);
+  const sourceSchemaVersion = candidate.schemaVersion === undefined
+    ? 1
+    : finite(candidate.schemaVersion, "schemaVersion");
   if (!Number.isSafeInteger(sourceSchemaVersion) || sourceSchemaVersion < 1) {
     throw new RangeError("无法识别的 schemaVersion");
   }
@@ -198,10 +358,17 @@ export const migrateScenarioDocument = (input: unknown): ScenarioMigrationResult
       `场景 schemaVersion=${sourceSchemaVersion} 高于当前支持的 ${CURRENT_SCENARIO_SCHEMA_VERSION}`
     );
   }
+  if (sourceDocumentVersion === 2 && sourceSchemaVersion !== CURRENT_SCENARIO_SCHEMA_VERSION) {
+    throw new RangeError("documentVersion 2 必须使用 schemaVersion 2");
+  }
 
+  const isLegacy = sourceSchemaVersion < CURRENT_SCENARIO_SCHEMA_VERSION || sourceDocumentVersion === 1;
   const baseline = createNominalScenario() as unknown as Record<string, unknown>;
-  const merged = mergeRecord(baseline, candidate) as unknown as ScenarioConfig;
-  merged.schemaVersion = CURRENT_SCENARIO_SCHEMA_VERSION;
+  const config = (isLegacy
+    ? mergeRecord(baseline, candidate)
+    : structuredClone(candidate)) as unknown as ScenarioConfig;
+  config.schemaVersion = CURRENT_SCENARIO_SCHEMA_VERSION;
+
   const warnings: string[] = [];
   if (sourceDocumentVersion === 1) {
     warnings.push("已将 v0.2 交换文档补齐为 documentVersion 2");
@@ -209,19 +376,29 @@ export const migrateScenarioDocument = (input: unknown): ScenarioMigrationResult
   if (sourceSchemaVersion < 2) {
     warnings.push("已从 schema v1 补入显式故障计划；所有新增故障默认关闭");
   }
-  if (!("parameterSources" in candidate)) {
+  if (isLegacy && !("parameterSources" in candidate)) {
     warnings.push("原文件缺少参数来源，已用标称代理场景的来源说明补齐");
   }
-  validateScenario(merged);
+
+  validateScenarioConfig(config);
+
+  if (sourceDocumentVersion === 2) {
+    if (sourceFingerprint === null) throw new TypeError("当前 v2 场景文档缺少 configFingerprint");
+    const actualFingerprint = fingerprintScenarioConfig(config);
+    if (sourceFingerprint !== actualFingerprint) {
+      throw new RangeError(
+        `configFingerprint 不匹配：文件声明 ${sourceFingerprint}，实际为 ${actualFingerprint}`
+      );
+    }
+  }
+
   return {
-    config: merged,
+    config,
     sourceDocumentVersion,
     targetDocumentVersion: 2,
     sourceSchemaVersion,
     targetSchemaVersion: CURRENT_SCENARIO_SCHEMA_VERSION,
-    migrated:
-      sourceSchemaVersion !== CURRENT_SCENARIO_SCHEMA_VERSION ||
-      (sourceDocumentVersion !== null && sourceDocumentVersion !== 2),
+    migrated: isLegacy,
     warnings
   };
 };

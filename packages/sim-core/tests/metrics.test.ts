@@ -10,6 +10,7 @@ import { RecoveryMetricsAccumulator } from "../src/metrics";
 import type {
   CaptureEvaluation,
   PlantAppliedForces,
+  PlantStepEnergy,
   PlantStepResult
 } from "../src/plant";
 
@@ -74,6 +75,29 @@ const makeForces = (): PlantAppliedForces => ({
   totalN: [0, 0, -981]
 });
 
+
+const makeEnergy = (): PlantStepEnergy => ({
+  contactActive: false,
+  translationalKineticBeforeJ: 0,
+  translationalKineticAfterJ: 0,
+  relativeKineticBeforeJ: 0,
+  relativeKineticAfterJ: 0,
+  rotationalKineticBeforeJ: 0,
+  rotationalKineticAfterJ: 0,
+  gravitationalPotentialBeforeJ: 0,
+  gravitationalPotentialAfterJ: 0,
+  gravityWorkJ: 0,
+  thrustWorkJ: 0,
+  aerodynamicWorkJ: 0,
+  contactWorkOnRocketJ: 0,
+  controlTorqueWorkJ: 0,
+  relativeContactWorkExtractedJ: 0,
+  platformBoundaryWorkJ: 0,
+  contactDampingDissipationJ: 0,
+  elasticStorageBeforeJ: 0,
+  elasticStorageAfterJ: 0
+});
+
 const makeStep = (tick = 1): PlantStepResult => ({
   tick,
   timeS: tick * 0.01,
@@ -83,6 +107,7 @@ const makeStep = (tick = 1): PlantStepResult => ({
   gustMps: [0, 0, 0],
   windMps: [0, 0, 0],
   forces: makeForces(),
+  energy: makeEnergy(),
   capture: noCapture(),
   capturedThisStep: false,
   missedThisStep: false,

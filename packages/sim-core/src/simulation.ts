@@ -7,6 +7,7 @@ import type {
   RocketMode,
   ScenarioConfig,
   SensorConfig,
+  SimulationEnergyLedger,
   SimulationRun,
   SimulationSnapshot,
   StateEstimate,
@@ -104,7 +105,7 @@ interface EstimatorLike {
   snapshot(): StateEstimate | null;
 }
 
-export const SIMULATION_MODEL_VERSION = "0.3.0";
+export const SIMULATION_MODEL_VERSION = "0.3.1";
 
 const terminalSupervisorStates = new Set<SupervisorState>([
   "SECURED",
@@ -395,6 +396,67 @@ const boundedNetworkStats = (network: VirtualNetwork, maximumLatencySamples = 51
   return stats;
 };
 
+const createEmptyEnergyLedger = (): SimulationEnergyLedger => ({
+  contactDetected: false,
+  startTick: null,
+  startTimeS: null,
+  endTick: 0,
+  endTimeS: 0,
+  physicsStepCount: 0,
+  initialTranslationalKineticJ: 0,
+  finalTranslationalKineticJ: 0,
+  initialRelativeKineticJ: 0,
+  finalRelativeKineticJ: 0,
+  initialRotationalKineticJ: 0,
+  finalRotationalKineticJ: 0,
+  initialGravitationalPotentialJ: 0,
+  finalGravitationalPotentialJ: 0,
+  gravityWorkJ: 0,
+  thrustWorkJ: 0,
+  aerodynamicWorkJ: 0,
+  contactWorkOnRocketJ: 0,
+  controlTorqueWorkJ: 0,
+  relativeContactWorkExtractedJ: 0,
+  platformBoundaryWorkJ: 0,
+  contactDampingDissipationJ: 0,
+  initialElasticStorageJ: 0,
+  finalElasticStorageJ: 0
+});
+
+const accumulateContactEnergy = (
+  ledger: SimulationEnergyLedger,
+  step: PlantStepResult,
+  dtS: number
+): void => {
+  if (!ledger.contactDetected && !step.energy.contactActive) return;
+  if (!ledger.contactDetected) {
+    ledger.contactDetected = true;
+    ledger.startTick = Math.max(0, step.tick - 1);
+    ledger.startTimeS = Math.max(0, step.timeS - dtS);
+    ledger.initialTranslationalKineticJ = step.energy.translationalKineticBeforeJ;
+    ledger.initialRelativeKineticJ = step.energy.relativeKineticBeforeJ;
+    ledger.initialRotationalKineticJ = step.energy.rotationalKineticBeforeJ;
+    ledger.initialGravitationalPotentialJ = step.energy.gravitationalPotentialBeforeJ;
+    ledger.initialElasticStorageJ = step.energy.elasticStorageBeforeJ;
+  }
+  ledger.endTick = step.tick;
+  ledger.endTimeS = step.timeS;
+  ledger.physicsStepCount += 1;
+  ledger.finalTranslationalKineticJ = step.energy.translationalKineticAfterJ;
+  ledger.finalRelativeKineticJ = step.energy.relativeKineticAfterJ;
+  ledger.finalRotationalKineticJ = step.energy.rotationalKineticAfterJ;
+  ledger.finalGravitationalPotentialJ = step.energy.gravitationalPotentialAfterJ;
+  ledger.gravityWorkJ += step.energy.gravityWorkJ;
+  ledger.thrustWorkJ += step.energy.thrustWorkJ;
+  ledger.aerodynamicWorkJ += step.energy.aerodynamicWorkJ;
+  ledger.contactWorkOnRocketJ += step.energy.contactWorkOnRocketJ;
+  ledger.controlTorqueWorkJ += step.energy.controlTorqueWorkJ;
+  ledger.relativeContactWorkExtractedJ += step.energy.relativeContactWorkExtractedJ;
+  ledger.platformBoundaryWorkJ += step.energy.platformBoundaryWorkJ;
+  ledger.contactDampingDissipationJ += step.energy.contactDampingDissipationJ;
+  ledger.finalElasticStorageJ = step.energy.elasticStorageAfterJ;
+};
+
 const telemetryFor = (
   step: PlantStepResult,
   estimate: StateEstimate,
@@ -494,6 +556,7 @@ export const runSimulation = (
     )
   });
   const metricsAccumulator = new RecoveryMetricsAccumulator();
+  const energyLedger = createEmptyEnergyLedger();
 
   const frames: SimulationSnapshot[] = [];
   const telemetry: TelemetrySample[] = [];
@@ -873,6 +936,7 @@ export const runSimulation = (
     heldPlantInput.winchStuck = activeWinchFaults(tick, dtS, simulationFaults);
 
     plantState = plant.step(heldPlantInput);
+    accumulateContactEnergy(energyLedger, plantState, dtS);
     const metrics = metricsAccumulator.update(
       plantState,
       rocketEstimate,
@@ -981,6 +1045,11 @@ export const runSimulation = (
   };
   frames[frames.length - 1] = finalSnapshot;
 
+  if (!energyLedger.contactDetected) {
+    energyLedger.endTick = finalSnapshot.tick;
+    energyLedger.endTimeS = finalSnapshot.timeS;
+  }
+
   return {
     modelVersion: SIMULATION_MODEL_VERSION,
     configFingerprint,
@@ -988,6 +1057,7 @@ export const runSimulation = (
     frames,
     telemetry,
     events,
+    energyLedger: structuredClone(energyLedger),
     finalSnapshot,
     metrics: finalMetrics
   };

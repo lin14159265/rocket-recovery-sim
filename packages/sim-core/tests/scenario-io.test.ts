@@ -75,4 +75,40 @@ describe("scenario document migration", () => {
     expect(() => migrateScenarioDocument(document)).toThrow(/documentVersion=99/);
   });
 
+  it("rejects a current v2 document with missing required fields", () => {
+    const document = createScenarioDocument(createNominalScenario()) as unknown as {
+      config: { rocket: Record<string, unknown> };
+    };
+    delete document.config.rocket.massKg;
+    expect(() => migrateScenarioDocument(document)).toThrow(/缺少必填字段 massKg/);
+  });
+
+  it("rejects invalid unvalidated fields and incompatible rates during import", () => {
+    const gravity = createScenarioDocument(createNominalScenario()) as unknown as {
+      config: { environment: { gravityMps2: unknown } };
+      configFingerprint: string;
+    };
+    gravity.config.environment.gravityMps2 = "oops";
+    expect(() => migrateScenarioDocument(gravity)).toThrow(/gravityMps2 必须是有限数值/);
+
+    const rateConfig = createNominalScenario();
+    rateConfig.controller.controlRateHz = 60;
+    const rateDocument = createScenarioDocument(createNominalScenario());
+    rateDocument.config = rateConfig;
+    rateDocument.configFingerprint = "00000000";
+    expect(() => migrateScenarioDocument(rateDocument)).toThrow(/整除物理 tick 频率/);
+  });
+
+  it("verifies the fingerprint of current v2 envelopes", () => {
+    const document = createScenarioDocument(createNominalScenario());
+    document.config.rocket.massKg += 1;
+    expect(() => migrateScenarioDocument(document)).toThrow(/configFingerprint 不匹配/);
+
+    const missing = createScenarioDocument(createNominalScenario()) as unknown as {
+      configFingerprint?: string;
+    };
+    delete missing.configFingerprint;
+    expect(() => migrateScenarioDocument(missing)).toThrow(/缺少 configFingerprint/);
+  });
+
 });
