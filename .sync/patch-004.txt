@@ -1,0 +1,312 @@
+
++      "version": "0.2.0",
+       "workspaces": [
+         "apps/*",
+         "packages/*"
+@@ -23,11 +23,11 @@
+     },
+     "apps/web": {
+       "name": "@recovery/web",
+-      "version": "0.1.0",
++      "version": "0.2.0",
+       "dependencies": {
+         "@react-three/drei": "^10.7.7",
+         "@react-three/fiber": "^9.6.1",
+-        "@recovery/sim-core": "0.1.0",
++        "@recovery/sim-core": "0.2.0",
+         "echarts": "^6.1.0",
+         "lucide-react": "^0.548.0",
+         "react": "^19.2.7",
+@@ -3006,7 +3006,7 @@
+     },
+     "packages/sim-core": {
+       "name": "@recovery/sim-core",
+-      "version": "0.1.0"
++      "version": "0.2.0"
+     }
+   }
+ }
+diff --git a/package.json b/package.json
+index bbac8bd7f93106f97efb65b41f42406b394c637a..7a05ec9b22fb0c2a8ca5ba3f40c7625dc0b5bb85 100644
+--- a/package.json
++++ b/package.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "cz10b-net-recovery-lab",
+-  "version": "0.1.0",
++  "version": "0.2.0",
+   "private": true,
+   "type": "module",
+   "workspaces": [
+diff --git a/packages/sim-core/package.json b/packages/sim-core/package.json
+index 382d512f656dbd61782b4ee566b4c6fb70909247..6ee1976a32e87aaa2bc103f9b8d0c05f0b6f785b 100644
+--- a/packages/sim-core/package.json
++++ b/packages/sim-core/package.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "@recovery/sim-core",
+-  "version": "0.1.0",
++  "version": "0.2.0",
+   "private": true,
+   "type": "module",
+   "exports": {
+diff --git a/packages/sim-core/src/config.ts b/packages/sim-core/src/config.ts
+index df401e60984fe9f45bd87f0819e12ebc13d95a6b..2a20c78b9a4f242e7db2c25aafc05c8a571e40dc 100644
+--- a/packages/sim-core/src/config.ts
++++ b/packages/sim-core/src/config.ts
+@@ -1,4 +1,5 @@
+ import type { ParameterSource, ScenarioConfig } from "./contracts";
++import { crc32, stableStringify } from "./comms/protocol";
+ 
+ const source = (status: ParameterSource["status"], sourceText: string, note: string): ParameterSource => ({
+   status,
+@@ -6,6 +7,9 @@ const source = (status: ParameterSource["status"], sourceText: string, note: str
+   note
+ });
+ 
++export const fingerprintScenarioConfig = (config: ScenarioConfig): string =>
++  crc32(stableStringify(config)).toString(16).padStart(8, "0");
++
+ export const createNominalScenario = (): ScenarioConfig => ({
+   schemaVersion: 1,
+   id: "nominal-cooperative",
+diff --git a/packages/sim-core/src/contracts.ts b/packages/sim-core/src/contracts.ts
+index f7749d6fd1950888b4a5ea69e2be6f9d7b308369..77648ffb0879df3d1bb176b6a9bda03ceaff7a00 100644
+--- a/packages/sim-core/src/contracts.ts
++++ b/packages/sim-core/src/contracts.ts
+@@ -364,6 +364,8 @@ export interface SimulationSnapshot {
+ }
+ 
+ export interface SimulationRun {
++  modelVersion: string;
++  configFingerprint: string;
+   config: ScenarioConfig;
+   frames: SimulationSnapshot[];
+   telemetry: TelemetrySample[];
+diff --git a/packages/sim-core/src/index.ts b/packages/sim-core/src/index.ts
+index 7552cbbb26ea9f3af36de2cacafc4a679c97f7ec..02f2290c0841235a960a3b4def8ba75eab8f4938 100644
+--- a/packages/sim-core/src/index.ts
++++ b/packages/sim-core/src/index.ts
+@@ -10,3 +10,4 @@ export * from "./control";
+ export * from "./plant";
+ export * from "./metrics";
+ export * from "./simulation";
++export * from "./experiments";
+diff --git a/packages/sim-core/src/simulation.ts b/packages/sim-core/src/simulation.ts
+index 3b023497c95f54ddc413cc720557f3593d942604..0f640c27bd9aa4ff6f0e17ae20c5537c4b366d55 100644
+--- a/packages/sim-core/src/simulation.ts
++++ b/packages/sim-core/src/simulation.ts
+@@ -17,6 +17,7 @@ import type {
+   WinchStatusPayload
+ } from "./contracts";
+ import { WINCH_IDS } from "./contracts";
++import { fingerprintScenarioConfig } from "./config";
+ import {
+   CaptureCoordinator,
+   RocketController,
+@@ -102,6 +103,8 @@ interface EstimatorLike {
+   snapshot(): StateEstimate | null;
+ }
+ 
++export const SIMULATION_MODEL_VERSION = "0.2.0";
++
+ const terminalSupervisorStates = new Set<SupervisorState>([
+   "SECURED",
+   "MISSED",
+@@ -456,7 +459,8 @@ export const runSimulation = (
+   const frames: SimulationSnapshot[] = [];
+   const telemetry: TelemetrySample[] = [];
+   const events: DomainEvent[] = [];
+-  const runId = `${config.id}-seed-${config.seed}`;
++  const configFingerprint = fingerprintScenarioConfig(config);
++  const runId = `${config.id}-${config.controller.algorithm}-seed-${config.seed}-cfg-${configFingerprint}`;
+   const event = (
+     tick: number,
+     type: string,
+@@ -487,6 +491,33 @@ export const runSimulation = (
+   let nextFrameTimeS = 0;
+   let finalSnapshot: SimulationSnapshot | null = null;
+ 
++  const snapshotForCurrentStep = (
++    snapshotMetrics: ReturnType<typeof currentMetrics>
++  ): SimulationSnapshot => {
++    if (rocketEstimate === null || groundEstimate === null) {
++      throw new Error("cannot record a snapshot before estimators initialize");
++    }
++    return {
++      runId,
++      tick: plantState.tick,
++      timeS: plantState.timeS,
++      rocket: structuredClone(plantState.rocket),
++      platform: structuredClone(plantState.platform),
++      net: structuredClone(plantState.net),
++      rocketEstimate: cloneEstimate(rocketEstimate, "rocket-nav"),
++      groundEstimate: cloneEstimate(groundEstimate),
++      capturePlan: coordinatorOutput?.plan === null || coordinatorOutput === null
++        ? null
++        : structuredClone(coordinatorOutput.plan),
++      control: structuredClone(heldPlantInput.rocketControl),
++      supervisorState: coordinatorOutput?.state ?? "BOOT",
++      radioStats: boundedNetworkStats(radio),
++      fieldbusStats: boundedNetworkStats(fieldbus),
++      metrics: snapshotMetrics,
++      latestEvents: events.slice(-8).map((entry) => ({ ...entry }))
++    };
++  };
++
+   for (let tick = 0; tick < maximumTick; tick += 1) {
+     if (tick % sensorTicks === 0) {
+       rocketEstimate = cloneEstimate(
+@@ -820,36 +851,23 @@ export const runSimulation = (
+     }
+ 
+     if (plantState.timeS + 1e-12 >= nextFrameTimeS) {
+-      const snapshotMetrics = currentMetrics(metricsAccumulator, coordinatorOutput);
+-      const snapshot: SimulationSnapshot = {
+-        runId,
+-        tick: plantState.tick,
+-        timeS: plantState.timeS,
+-        rocket: structuredClone(plantState.rocket),
+-        platform: structuredClone(plantState.platform),
+-        net: structuredClone(plantState.net),
+-        rocketEstimate: cloneEstimate(rocketEstimate, "rocket-nav"),
+-        groundEstimate: cloneEstimate(groundEstimate),
+-        capturePlan: coordinatorOutput?.plan === null || coordinatorOutput === null
+-          ? null
+-          : structuredClone(coordinatorOutput.plan),
+-        control: structuredClone(heldPlantInput.rocketControl),
+-        supervisorState: coordinatorOutput?.state ?? "BOOT",
+-        radioStats: boundedNetworkStats(radio),
+-        fieldbusStats: boundedNetworkStats(fieldbus),
+-        metrics: snapshotMetrics,
+-        latestEvents: events.slice(-8).map((entry) => ({ ...entry }))
+-      };
++      const snapshot = snapshotForCurrentStep(currentMetrics(metricsAccumulator, coordinatorOutput));
+       frames.push(snapshot);
+       finalSnapshot = snapshot;
+       nextFrameTimeS += 1 / frameRateHz;
+     }
+ 
+-    if (
+-      options.stopOnTerminal === true &&
+-      coordinatorOutput !== null &&
+-      terminalSupervisorStates.has(coordinatorOutput.state)
+-    ) {
++    const supervisorTerminal = coordinatorOutput !== null &&
++      terminalSupervisorStates.has(coordinatorOutput.state);
++    const physicalTerminalReady = coordinatorOutput?.state !== "SECURED" || metrics.secured;
++    if (options.stopOnTerminal === true && supervisorTerminal && physicalTerminalReady) {
++      const terminalSnapshot = snapshotForCurrentStep(currentMetrics(metricsAccumulator, coordinatorOutput));
++      if (frames.at(-1)?.tick === terminalSnapshot.tick) {
++        frames[frames.length - 1] = terminalSnapshot;
++      } else {
++        frames.push(terminalSnapshot);
++      }
++      finalSnapshot = terminalSnapshot;
+       break;
+     }
+     void metrics;
+@@ -859,14 +877,31 @@ export const runSimulation = (
+     throw new Error("simulation produced no snapshots");
+   }
+   const finalMetrics = currentMetrics(metricsAccumulator, coordinatorOutput);
+-  finalSnapshot = {
+-    ...finalSnapshot,
+-    metrics: finalMetrics,
++  const exactFinalSnapshot: SimulationSnapshot = {
++    runId,
++    tick: plantState.tick,
++    timeS: plantState.timeS,
++    rocket: structuredClone(plantState.rocket),
++    platform: structuredClone(plantState.platform),
++    net: structuredClone(plantState.net),
++    rocketEstimate: cloneEstimate(rocketEstimate!, "rocket-nav"),
++    groundEstimate: cloneEstimate(groundEstimate!),
++    capturePlan: coordinatorOutput?.plan === null || coordinatorOutput === null
++      ? null
++      : structuredClone(coordinatorOutput.plan),
++    control: structuredClone(heldPlantInput.rocketControl),
++    supervisorState: coordinatorOutput?.state ?? "BOOT",
+     radioStats: radio.getStats(),
+     fieldbusStats: fieldbus.getStats(),
++    metrics: finalMetrics,
+     latestEvents: events.slice(-8).map((entry) => ({ ...entry }))
+   };
+-  frames[frames.length - 1] = finalSnapshot;
++  finalSnapshot = exactFinalSnapshot;
++  if (frames.at(-1)?.tick === exactFinalSnapshot.tick) {
++    frames[frames.length - 1] = exactFinalSnapshot;
++  } else {
++    frames.push(exactFinalSnapshot);
++  }
+   event(
+     finalSnapshot.tick,
+     "SIMULATION_FINISHED",
+@@ -875,16 +910,20 @@ export const runSimulation = (
+       ? "仿真结束：已捕获并稳定"
+       : `仿真结束：${finalMetrics.failureReason ?? "未在时限内稳定"}`
+   );
++  finalSnapshot = {
++    ...finalSnapshot,
++    latestEvents: events.slice(-8).map((entry) => ({ ...entry }))
++  };
++  frames[frames.length - 1] = finalSnapshot;
+ 
+   return {
++    modelVersion: SIMULATION_MODEL_VERSION,
++    configFingerprint,
+     config,
+     frames,
+     telemetry,
+     events,
+-    finalSnapshot: {
+-      ...finalSnapshot,
+-      latestEvents: events.slice(-8).map((entry) => ({ ...entry }))
+-    },
++    finalSnapshot,
+     metrics: finalMetrics
+   };
+ };
+diff --git a/packages/sim-core/tests/simulation.test.ts b/packages/sim-core/tests/simulation.test.ts
+index dec2d0cf16da34255246af505fec85cbb8093f93..ce804a24370468fc3cbc06a8a9834e4f9823cf51 100644
+--- a/packages/sim-core/tests/simulation.test.ts
++++ b/packages/sim-core/tests/simulation.test.ts
+@@ -32,6 +32,18 @@ describe("multi-rate recovery simulation", () => {
+     ]));
+   });
+ 
++  it("records the physical terminal snapshot when stopOnTerminal is enabled", () => {
++    const run = runSimulation(createNominalScenario(), {
++      frameRateHz: 2,
++      stopOnTerminal: true
++    });
++
++    expect(run.finalSnapshot.supervisorState).toBe("SECURED");
++    expect(run.metrics.secured).toBe(true);
++    expect(run.finalSnapshot.metrics.secured).toBe(true);
++    expect(run.frames.at(-1)).toEqual(run.finalSnapshot);
++  });
++
+   it("is bit-repeatable for the same scenario and seed", () => {
+     const first = runSimulation(createNominalScenario(), { frameRateHz: 2 });
+     const second = runSimulation(createNominalScenario(), { frameRateHz: 2 });
+@@ -44,6 +56,19 @@ describe("multi-rate recovery simulation", () => {
+     expect(second.finalSnapshot.radioStats).toEqual(first.finalSnapshot.radioStats);
+   });
+ 
++  it("identifies the model version and exact configuration", () => {
++    const baseline = runSimulation(createNominalScenario(), { frameRateHz: 1 });
++    const changedConfig = createNominalScenario();
++    changedConfig.rocket.massKg += 1;
++    const changed = runSimulation(changedConfig, { frameRateHz: 1 });
++
++    expect(baseline.modelVersion).toMatch(/^0\.2\./);
++    expect(baseline.configFingerprint).toMatch(/^[0-9a-f]{8}$/);
++    expect(changed.configFingerprint).not.toBe(baseline.configFingerprint);
++    expect(baseline.finalSnapshot.runId).toContain(baseline.configFingerprint);
++    expect(baseline.finalSnapshot.runId).toContain(baseline.config.controller.algorithm);
++  });
++
+   it("cannot magically capture through a sustained radio blackout", () => {
+     const run = runSimulation(createNominalScenario(), {
+       frameRateHz: 2,
