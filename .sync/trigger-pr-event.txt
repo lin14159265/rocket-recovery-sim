@@ -1,1 +1,1 @@
-通过 pull_request synchronize 事件重试 v0.3.1 三方合并、质量门禁与 GitHub Pages 部署。
+通过 pull_request synchronize 事件生成 v0.3.1 补丁冲突诊断并继续 Pages 发布。
