@@ -1,0 +1,371 @@
+nerror = (event) => {
++      if (requestId !== comparisonRequestIdRef.current) return;
++      setError(`有界扰动 Worker 异常：${event.message || "未知错误"}`);
++      setBusyMonteCarlo(false);
++      worker.terminate();
++      if (comparisonWorkerRef.current === worker) comparisonWorkerRef.current = null;
++    };
++
++    const request: SimulationWorkerRequest = {
++      requestId,
++      kind: "comparison",
++      config: cloneConfig(config),
++      samplesPerVariant
++    };
++    worker.postMessage(request);
++  }, [config]);
++
++
++  const handleTogglePlaying = useCallback(() => {
++    if (run === null || dirty) return;
++    const durationS = run.finalSnapshot.timeS;
++    if (!playing && currentTimeS >= durationS - 1e-6) {
++      setCurrentTimeS(0);
++      setPlaying(true);
++      return;
++    }
++    setPlaying((value) => !value);
++  }, [currentTimeS, dirty, playing, run]);
++
++  const handleStep = useCallback((direction: -1 | 1) => {
++    if (run === null || dirty) return;
++    setPlaying(false);
++    const frames = run.frames;
++    if (frames.length === 0) return;
++    const currentIndex = frames.findLastIndex((candidate) => candidate.timeS <= currentTimeS + 1e-9);
++    const targetIndex = Math.max(0, Math.min(frames.length - 1, currentIndex + direction));
++    setCurrentTimeS(frames[targetIndex]?.timeS ?? currentTimeS);
++  }, [currentTimeS, dirty, run]);
++
++
++  const cancelMonteCarlo = useCallback(() => {
++    comparisonRequestIdRef.current += 1;
++    comparisonWorkerRef.current?.terminate();
++    comparisonWorkerRef.current = null;
++    setBusyMonteCarlo(false);
++  }, []);
++
++  const handleSeek = useCallback((timeS: number) => {
++    const maximum = run?.finalSnapshot.timeS ?? config.durationS;
++    setCurrentTimeS(Math.max(0, Math.min(maximum, timeS)));
++  }, [config.durationS, run]);
++
+   return (
+-    <main className="boot-screen">
+-      <section className="boot-copy" aria-live="polite">
+-        <span className="boot-kicker">RECOVERY CONTROL LAB</span>
+-        <h1>长征十号乙海上网系回收协同控制实验台</h1>
+-        <p>正在装载确定性仿真内核…</p>
+-        <small>公开信息约束下的候选算法代理模型 · 非官方实现</small>
+-      </section>
+-    </main>
++    <Dashboard
++      run={run}
++      frame={frame}
++      currentTimeS={currentTimeS}
++      config={config}
++      busy={busy}
++      dirty={dirty}
++      error={error}
++      playing={playing}
++      speed={speed}
++      selectedInspectorTab={selectedInspectorTab}
++      onTogglePlaying={handleTogglePlaying}
++      onReset={() => runScenario(config)}
++      onStep={handleStep}
++      onSeek={handleSeek}
++      onSpeedChange={setSpeed}
++      onInspectorTabChange={setSelectedInspectorTab}
++      onParameterChange={handleParameterChange}
++      onAlgorithmChange={handleAlgorithmChange}
++      onPresetChange={handlePresetChange}
++      onSeedChange={handleSeedChange}
++      onExportScenario={() => downloadJson(
++        `recovery-scenario-${config.id}-seed-${config.seed}.json`,
++        {
++          format: "recovery-proxy-scenario",
++          modelVersion: SIMULATION_MODEL_VERSION,
++          configFingerprint: fingerprintScenarioConfig(config),
++          notice: "公开机理代理模型场景，不是官方型号参数",
++          config
++        }
++      )}
++      onExportRun={() => {
++        if (run !== null) {
++          downloadJson(
++            `recovery-run-${run.config.id}-seed-${run.config.seed}.json`,
++            {
++              format: "recovery-proxy-run",
++              modelVersion: run.modelVersion,
++              configFingerprint: run.configFingerprint,
++              notice: "公开机理代理模型运行结果，不是实际型号试验结论",
++              run
++            }
++          );
++        }
++      }}
++      onRunMonteCarlo={handleMonteCarlo}
++      onCancelMonteCarlo={cancelMonteCarlo}
++      monteCarloSummary={monteCarloSummary}
++      busyMonteCarlo={busyMonteCarlo}
++    />
+   );
+ }
+diff --git a/apps/web/src/components/Dashboard.tsx b/apps/web/src/components/Dashboard.tsx
+index 15c7a4529c0383f009d9190752be20877aee4228..4406441c097de7630dd7052be9eebb38760ede24 100644
+--- a/apps/web/src/components/Dashboard.tsx
++++ b/apps/web/src/components/Dashboard.tsx
+@@ -1,25 +1,37 @@
+-import { useState } from "react";
+-import type {
+-  AlgorithmMode,
+-  ScenarioConfig,
+-  SimulationRun,
+-  SimulationSnapshot
++import { lazy, Suspense, useState } from "react";
++import {
++  fingerprintScenarioConfig,
++  SIMULATION_MODEL_VERSION,
++  type AlgorithmMode,
++  type ScenarioConfig,
++  type SimulationRun,
++  type SimulationSnapshot
+ } from "@recovery/sim-core";
+ import {
+   Activity,
++  BookOpen,
+   BrainCircuit,
+   Camera,
+   CameraOff,
+   FlaskConical,
+   Radio,
+-  RotateCcw
++  RotateCcw,
++  X
+ } from "lucide-react";
+-import { RecoveryScene } from "./RecoveryScene";
+-import { TelemetryCharts } from "./TelemetryCharts";
+ import { Inspector } from "./Inspector";
+ import { PlaybackBar } from "./PlaybackBar";
+ import "../dashboard.css";
+ 
++const RecoveryScene = lazy(async () => {
++  const module = await import("./RecoveryScene");
++  return { default: module.RecoveryScene };
++});
++
++const TelemetryCharts = lazy(async () => {
++  const module = await import("./TelemetryCharts");
++  return { default: module.TelemetryCharts };
++});
++
+ export type InspectorTab = "scenario" | "communications" | "algorithm" | "experiment";
+ 
+ export type DashboardPreset =
+@@ -53,9 +65,11 @@ export interface MonteCarloVariantSummary {
+   algorithm: AlgorithmMode | "open-loop";
+   runs: number;
+   captures: number;
++  secured: number;
+   captureRate: number;
+-  meanPeakLoadG: number;
+-  p95PeakLoadG: number;
++  securedRate: number;
++  meanPeakLoadKn: number;
++  p95PeakLoadKn: number;
+ }
+ 
+ export interface MonteCarloSummary {
+@@ -69,18 +83,25 @@ export interface DashboardProps {
+   currentTimeS: number;
+   config: ScenarioConfig;
+   busy: boolean;
++  dirty: boolean;
++  error: string | null;
+   playing: boolean;
+   speed: number;
+   selectedInspectorTab: InspectorTab;
+   onTogglePlaying: () => void;
+   onReset: () => void;
++  onStep: (direction: -1 | 1) => void;
+   onSeek: (timeS: number) => void;
+   onSpeedChange: (speed: number) => void;
+   onInspectorTabChange: (tab: InspectorTab) => void;
+   onParameterChange: (path: DashboardParameterKey, value: number) => void;
+   onAlgorithmChange: (algorithm: AlgorithmMode) => void;
+   onPresetChange: (preset: DashboardPreset) => void;
++  onSeedChange: (seed: number) => void;
++  onExportScenario: () => void;
++  onExportRun: () => void;
+   onRunMonteCarlo?: (count: number) => void;
++  onCancelMonteCarlo?: () => void;
+   monteCarloSummary?: MonteCarloSummary | null;
+   busyMonteCarlo?: boolean;
+ }
+@@ -156,24 +177,33 @@ export function Dashboard({
+   currentTimeS,
+   config,
+   busy,
++  dirty,
++  error,
+   playing,
+   speed,
+   selectedInspectorTab,
+   onTogglePlaying,
+   onReset,
++  onStep,
+   onSeek,
+   onSpeedChange,
+   onInspectorTabChange,
+   onParameterChange,
+   onAlgorithmChange,
+   onPresetChange,
++  onSeedChange,
++  onExportScenario,
++  onExportRun,
+   onRunMonteCarlo,
++  onCancelMonteCarlo,
+   monteCarloSummary = null,
+   busyMonteCarlo = false
+ }: DashboardProps) {
+   const [cameraFollow, setCameraFollow] = useState(true);
+   const [cameraResetToken, setCameraResetToken] = useState(0);
++  const [boundaryOpen, setBoundaryOpen] = useState(false);
+   const durationS = run?.config.durationS ?? config.durationS;
++  const configFingerprint = fingerprintScenarioConfig(config);
+   const stateLabel = frame === null
+     ? busy ? "仿真计算中" : "等待运行"
+     : STATE_LABELS[frame.supervisorState] ?? frame.supervisorState;
+@@ -184,7 +214,8 @@ export function Dashboard({
+       <header className="dashboard-header">
+         <div className="dashboard-brand">
+           <h1>井字网系回收概念模拟器</h1>
+-          <p>公开机理约束下的候选协同算法 · 非官方型号复现</p>
++          <p>公开机理代理模型 v{run?.modelVersion ?? SIMULATION_MODEL_VERSION} · seed {config.seed} · cfg {configFingerprint}</p>
++          {dirty ? <span className="dirty-indicator">参数已修改，点击“重启”应用</span> : null}
+         </div>
+ 
+         <MetricStrip frame={frame} run={run} />
+@@ -207,6 +238,14 @@ export function Dashboard({
+             <RotateCcw size={16} />
+             视角复位
+           </button>
++          <button
++            className="tool-button"
++            type="button"
++            onClick={() => setBoundaryOpen(true)}
++          >
++            <BookOpen size={16} />
++            模型边界
++          </button>
+         </div>
+       </header>
+ 
+@@ -215,12 +254,14 @@ export function Dashboard({
+           <div className="panel-corner-label">
+             t = <strong>{formatMetric(frame?.timeS ?? null, 2)}</strong> s
+           </div>
+-          <RecoveryScene
+-            frame={frame}
+-            config={config}
+-            cameraFollow={cameraFollow}
+-            resetToken={cameraResetToken}
+-          />
++          <Suspense fallback={<div className="panel-loading">正在装载三维视图…</div>}>
++            <RecoveryScene
++              frame={frame}
++              config={config}
++              cameraFollow={cameraFollow}
++              resetToken={cameraResetToken}
++            />
++          </Suspense>
+           {frame === null ? (
+             <div className="panel-empty panel-empty--scene" role="status">
+               <Activity size={23} />
+@@ -236,7 +277,9 @@ export function Dashboard({
+         </section>
+ 
+         <section className="charts-panel panel-shell" aria-label="实时遥测曲线">
+-          <TelemetryCharts run={run} currentTimeS={currentTimeS} />
++          <Suspense fallback={<div className="panel-loading">正在装载遥测图表…</div>}>
++            <TelemetryCharts run={run} currentTimeS={currentTimeS} />
++          </Suspense>
+         </section>
+ 
+         <aside className="inspector-panel panel-shell" aria-label="场景与算法检查器">
+@@ -280,10 +323,16 @@ export function Dashboard({
+             frame={frame}
+             config={config}
+             busy={busy}
++            dirty={dirty}
+             onParameterChange={onParameterChange}
+             onAlgorithmChange={onAlgorithmChange}
+             onPresetChange={onPresetChange}
++            onSeedChange={onSeedChange}
++            onRerun={onReset}
++            onExportScenario={onExportScenario}
++            onExportRun={onExportRun}
+             onRunMonteCarlo={onRunMonteCarlo}
++            onCancelMonteCarlo={onCancelMonteCarlo}
+             monteCarloSummary={monteCarloSummary}
+             busyMonteCarlo={busyMonteCarlo}
+           />
+@@ -293,17 +342,48 @@ export function Dashboard({
+       <PlaybackBar
+         currentTimeS={currentTimeS}
+         durationS={durationS}
+-        busy={busy}
++        busy={busy || busyMonteCarlo}
+         playing={playing}
+         speed={speed}
+-        stateLabel={stateLabel}
+-        stateTone={stateTone}
+-        canPlay={run !== null}
++        stateLabel={busyMonteCarlo ? "有界扰动计算中" : dirty ? "参数待应用" : stateLabel}
++        stateTone={busyMonteCarlo ? "active" : dirty ? "hot" : stateTone}
++        canPlay={run !== null && !dirty}
+         onTogglePlaying={onTogglePlaying}
+         onReset={onReset}
++        onStep={onStep}
+         onSeek={onSeek}
+         onSpeedChange={onSpeedChange}
+       />
++
++      {error !== null ? <div className="dashboard-error" role="alert">{error}</div> : null}
++
++      {boundaryOpen ? (
++        <div className="boundary-backdrop" role="presentation" onMouseDown={() => setBoundaryOpen(false)}>
++          <section
++            className="boundary-dialog"
++            role="dialog"
++            aria-modal="true"
++            aria-labelledby="boundary-title"
++            onMouseDown={(event) => event.stopPropagation()}
++          >
++            <header>
++              <div>
++                <h2 id="boundary-title">模型适用边界</h2>
++                <p>这里展示的是可审查的公开机理代理模型，不是型号数字孪生。</p>
++              </div>
++              <button type="button" aria-label="关闭模型边界说明" onClick={() => setBoundaryOpen(false)}><X size={20} /></button>
++            </header>
++            <div className="boundary-grid">
++              <article><strong>可以用于</strong><p>验证通信—估计—控制—执行机构—接触动力学的闭环逻辑，比较候选算法在同一组有界扰动下的相对表现。</p></article>
++              <article><strong>不能用于</strong><p>推断真实型号成功率、结构安全裕度、绞盘能力、制导律参数或工程验收结论。</p></article>
++              <article><strong>参数来源</strong><p>界面将参数标为公开确认、公开估计、代理标定或研究假设；未公开参数不会伪装成官方数据。</p></article>
++              <article><strong>可重复性</strong><p>同一配置、算法版本和 seed 产生确定性一致结果；Monte Carlo 使用成对扰动比较三种算法。</p></article>
++              <article><strong>状态隔离</strong><p>控制器只消费显式传感器采样、估计结果和虚拟链路投递消息；真实状态仅进入被控对象、指标和只读记录器。</p></article>
++              <article><strong>结果解释</strong><p>捕获、稳定、断绳和中止均由显式判据产生，并通过事件、遥测、链路统计和最终指标留痕。</p></article>
++            </div>
++          </section>
++        </div>
++      ) : null}
+     </main>
+   );
+ }
+diff --git a/apps/web/src/components/Inspector.tsx b/apps/web/src/components/Inspector.tsx
+index e9b47f33181f6cfe0c0466cf25c40e0ce222b0cc..9bd6d4e4da6a0d46028c102911b8250874585fa0 100644
+--- a/apps/web/src/components/Inspector.tsx
++++ b/apps/web/src/components/Inspector.tsx
+@@ -13,7 +13,10 @@ import {
+   CircleG
