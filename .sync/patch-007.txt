@@ -1,0 +1,356 @@
++它不能替代全局敏感性、不确定度传播、参数相关性分析或真实型号试验。低敏感性也不等于参数真实或不重要；它可能只是当前场景没有激发对应机理。
++
++## 可重复执行
++
++浏览器“证据”页可以计算并显示追溯表。命令行可运行：
++
++```powershell
++npm run lab:sensitivity
++npm run lab:sensitivity -- --preset low-damping --json
++```
++
++JSON 输出适合保存到实验记录或后续数据处理流程。
+diff --git "a/docs/\345\234\272\346\231\257\346\240\274\345\274\217\344\270\216\347\211\210\346\234\254\350\277\201\347\247\273.md" "b/docs/\345\234\272\346\231\257\346\240\274\345\274\217\344\270\216\347\211\210\346\234\254\350\277\201\347\247\273.md"
+new file mode 100644
+index 0000000000000000000000000000000000000000..22d211788d56e169a842a3f17cd233b30b7a7325
+--- /dev/null
++++ "b/docs/\345\234\272\346\231\257\346\240\274\345\274\217\344\270\216\347\211\210\346\234\254\350\277\201\347\247\273.md"
+@@ -0,0 +1,59 @@
++# 场景 JSON 格式与版本迁移
++
++## 目的
++
++场景文件用于保存可重复实验的完整输入。它只描述本项目的公开机理代理模型，不是型号参数文件，也不应被解释为真实任务配置。
++
++## 当前格式
++
++v0.3.0 使用两层版本：
++
++- `documentVersion`：外层交换文档版本，当前为 `2`。
++- `config.schemaVersion`：场景配置结构版本，当前为 `2`。
++
++浏览器导出的文件包含：
++
++```json
++{
++  "format": "recovery-proxy-scenario",
++  "documentVersion": 2,
++  "modelVersion": "0.3.0",
++  "configFingerprint": "...",
++  "notice": "公开机理代理模型场景，不是官方型号参数",
++  "config": {}
++}
++```
++
++`configFingerprint` 用于识别配置内容是否发生变化，不是数字签名，也不提供来源真实性证明。
++
++## 导入兼容范围
++
++导入器接受：
++
++1. v1 原始 `ScenarioConfig` 对象；
++2. v0.2 导出的 `recovery-proxy-scenario` 文档包；
++3. 当前 v2 文档包。
++
++从 v1 迁移到 v2 时，会补入四类默认关闭的显式故障计划：无线静默、绞盘卡滞、导航偏置阶跃、推力降额。缺失的参数来源说明由当前标称场景补齐，并在界面中显示迁移警告。
++
++## 拒绝规则
++
++导入器会拒绝：
++
++- 不是 JSON 对象的顶层内容；
++- 未知的文档 `format`；
++- 高于当前支持版本的 `schemaVersion`；
++- 非有限数值、非法概率、非正步长或持续时间；
++- 不受支持的算法模式或绞盘节点；
++- 维度错误的三维向量；
++- 闭合半间距不小于张开半间距等明显矛盾参数。
++
++这是结构和基本物理边界检查，不等同于场景在工程上合理。
++
++## 迁移原则
++
++- 旧字段保留原值；新字段使用保守默认值。
++- 不静默接受未来版本。
++- 每次迁移返回来源版本、目标版本和中文警告。
++- 导入后不会立即覆盖当前结果；用户必须点击“应用参数并重算”。
++- 运行结果继续记录模型版本、配置指纹、seed 和运行标识。
+diff --git "a/docs/\346\216\245\347\256\241\345\256\241\350\256\241\344\270\216\345\256\236\347\216\260\347\212\266\346\200\201.md" "b/docs/\346\216\245\347\256\241\345\256\241\350\256\241\344\270\216\345\256\236\347\216\260\347\212\266\346\200\201.md"
+new file mode 100644
+index 0000000000000000000000000000000000000000..0ed54ee48c48de8cdf3d1367a679e26b839bc53b
+--- /dev/null
++++ "b/docs/\346\216\245\347\256\241\345\256\241\350\256\241\344\270\216\345\256\236\347\216\260\347\212\266\346\200\201.md"
+@@ -0,0 +1,78 @@
++# 接管审计与实现状态
++
++更新日期：2026-07-14
++
++## 产品定位
++
++本工程是一套**公开机理代理仿真软件**。它用于研究候选闭环的因果链、状态机、通信退化、估计误差、执行机构约束和等效接触载荷，不是实际型号数字孪生，也不能输出真实型号成功率、结构裕度或工程验收结论。
++
++## 已打通的产品闭环
++
++```text
++场景/算法/seed
++    ↓
++Web Worker 确定性仿真
++    ↓
++SimulationRun（配置、快照、遥测、事件、指标）
++    ↓
++播放 / 暂停 / 单帧 / 拖动回放
++    ↓
++Three.js 真值与估计视图 + ECharts 遥测 + 检查器
++    ↓
++结果 JSON 导出 / 相同 seed 重算 / 有界扰动算法对照
++```
++
++已实现：
++
++- 启动后自动运行标称场景，不再停留在装载页面。
++- 场景预设、算法切换、参数编辑和显式“应用参数并重算”。
++- 播放、暂停、前后单帧、时间轴拖动和 0.25×–4× 播放速度。
++- 真实状态、地面估计和预测交会位置的三维显示。
++- 遥测曲线、状态机、通信统计、控制指令、最终指标与事件证据。
++- 参数来源分级：公开确认、公开估计、代理标定、研究假设。
++- 模型边界说明弹窗，明确可用与不可用范围。
++- 相同配置与 seed 的确定性重算；场景和完整运行结果 JSON 导出。
++- 运行结果携带模型版本、配置指纹和包含二者的运行标识，便于复核与追溯。
++- 固定网、α–β 和预测协同的成对有界扰动对照，可主动取消批量任务。
++- 单场景与批量试验均在 Web Worker 中运行，避免阻塞界面。
++- Three.js 与 ECharts 按需加载，降低首屏主包体积。
++
++## 本次修复的核心逻辑缺陷
++
++原实现启用 `stopOnTerminal` 时，协调器可能先进入 `SECURED`，但物理稳定判据尚未写入指标；程序会提前停止并返回上一帧 `ARREST`，造成状态机、最终快照和指标不一致。
++
++现已改为：
++
++1. `SECURED` 只有在物理指标也确认稳定后才允许提前停止。
++2. 终止时强制记录当前精确 tick，而不是复用上一张低频 UI 快照。
++3. `SIMULATION_FINISHED` 事件同步写回最后一帧和 `finalSnapshot`。
++4. 增加回归测试，覆盖 `stopOnTerminal` 的物理终态一致性。
++
++## 当前验证结果
++
++- TypeScript 类型检查：通过。
++- Vitest：7 个测试文件、47 个测试全部通过。
++- 生产构建：通过。
++- CLI 标称场景：`SECURED`，捕获并满足代理稳定判据。
++- 相同配置与 seed：事件、遥测、指标及最终状态可重复。
++- 持续无线黑障与绞盘卡死：明确中止，不能“神奇成功”。
++
++## 已知限制
++
++- 四根阻拦索采用 Kelvin–Voigt 集总等效模型，不含分段柔性绳、波传播、滑轮摩擦和局部结构应力。
++- 火箭气动、推力、姿态与导航均为终端阶段代理模型。
++- 姿态传感器尚未配置独立噪声参数，当前通过显式采样边界隔离真值，但仍需进一步细化。
++- 平台运动是参数化低频六自由度子集，不是海况谱或船舶水动力模型。
++- 有界扰动分布是研究假设；其统计结果只能用于模型内算法对照。
++- 浏览器批量试验默认限制为每种算法 3–20 个样本。大样本应使用 CLI，并记录硬件、版本与耗时。
++- 目前没有导入场景 JSON、实验数据库、结果签名和跨版本迁移工具。
++- 当前没有对真实硬件、半实物平台或公开试验数据进行系统辨识。
++
++## 下一阶段优先级
++
++1. 增加场景 JSON 导入、模型版本兼容检查和配置迁移。
++2. 增加批量试验进度与分批汇总；当前已支持取消，但尚无连续进度百分比。
++3. 完成步长收敛、能量平衡和接触力方向的自动验证报告。
++4. 将等效索网接口化，允许替换为分段柔性绳模型。
++5. 增加故障注入 UI：无线黑障、单绞盘卡死、传感器偏置与量测中断。
++6. 建立“假设—参数—证据—敏感性”可追溯表，而不是继续堆叠视觉效果。
+diff --git "a/docs/\347\263\273\347\273\237\346\236\266\346\236\204\350\256\276\350\256\241.md" "b/docs/\347\263\273\347\273\237\346\236\266\346\236\204\350\256\276\350\256\241.md"
+index fc08e2db204fc226146fcb1dd89da44bc78b8a1e..6d61b1d299080d7a8d49d15a1466fd50063c9dc7 100644
+--- "a/docs/\347\263\273\347\273\237\346\236\266\346\236\204\350\256\276\350\256\241.md"
++++ "b/docs/\347\263\273\347\273\237\346\236\266\346\236\204\350\256\276\350\256\241.md"
+@@ -74,3 +74,12 @@ producedTick, expiresTick, payload, crc32
+ - 网控拥有四绳位置、速度、张力与绞盘状态。
+ - 通信模块拥有序号、队列、超时、CRC 与统计。
+ - 每条控制量必须保留 `desired` 与 `applied`。
++
++## 浏览器应用层
++
++- `App`：持有场景配置、运行结果、回放时间、脏状态和错误状态。
++- `simulation.worker`：执行单场景和算法对照；新的单场景请求会终止旧 Worker，避免过期结果覆盖当前配置。
++- `Dashboard`：只消费运行结果和回调，不直接调用物理内核。
++- `RecoveryScene` / `TelemetryCharts`：按需加载，分别负责三维和曲线，不拥有控制状态。
++- 参数连续编辑只标记“待应用”；场景与算法离散切换立即重新运行，避免滑块拖动时排队大量仿真。
++- 回放读取预计算快照，不重新推进物理时间，因此显示掉帧与拖动不会改变仿真结果。
+diff --git "a/docs/\351\252\214\350\257\201\350\256\241\345\210\222.md" "b/docs/\351\252\214\350\257\201\350\256\241\345\210\222.md"
+index b8721d14d192dc96956f7181d880e12ada296e54..0ae15e8d04f9c3ae3ebb12b5550d6ebf8e809bdc 100644
+--- "a/docs/\351\252\214\350\257\201\350\256\241\345\210\222.md"
++++ "b/docs/\351\252\214\350\257\201\350\256\241\345\210\222.md"
+@@ -27,7 +27,8 @@
+ - 无线 20/100/250 ms 延迟，0/5/20% 丢包，1 s 黑障。
+ - 风浪增强、初始横向偏差/速度、质量和气动误差。
+ - 单绞盘迟滞/卡死、传感器偏置和量测中断。
+-- 200–1000 个 seed 的 Monte Carlo。
++- 浏览器快速对照：每种算法 3–20 个成对样本。
++- CLI 长时间研究：200–1000 个 seed，并记录软件版本、配置哈希、硬件和耗时。
+ 
+ ## 指标
+ 
+@@ -36,4 +37,11 @@
+ - 链路 p50/p95/p99 时延、有效丢包、迟包拒绝和最长黑障。
+ - 控制计算耗时与实时因子。
+ 
+-第一阶段软件门槛：名义场景必过；名义 Monte Carlo 捕获率 >= 95%；定义为不可行的场景必须在接触前中止或明确失败。以上是软件开发门槛，不是实际型号指标。
++开发目标：名义场景必须通过；定义为不可行的场景必须在接触前中止或明确失败。高捕获率只能作为后续模型内回归目标，当前有界扰动结果尚未达到可宣称的稳健性水平，不得把目标值或模型内比例表述为实际型号指标。
++
++## v0.3.0 自动验证入口
++
++1. **步长收敛**：固定场景、算法与 seed，依次使用 Δt、Δt/2、Δt/4；检查终态分类一致性以及最小错位、捕获速度、峰值接触力、最终相对位置和速度的归一差异。
++2. **代理能量账本**：从首次接触前一帧开始，统计相对动能、重力势能释放、接触耗散代理和最终弹性能代理；气动、转动、执行机构及离散误差统一保留在“未观测残差”中。
++3. **局部敏感性**：关键参数按 5%–25% 单因素正向扰动，比较最小错位、捕获速度、峰值接触力、估计误差和稳定终态。
++4. **解释限制**：上述验证仅判断当前代理模型的数值一致性与参数敏感性，不代表真实结构、控制系统或型号试验验证。
+diff --git a/package-lock.json b/package-lock.json
+index 1a8fdf762a840064028ab701ba1c53b08f88304e..be9ffac1ebbe2b8b93a8ce2a2f4f3f0b5a40c437 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -1,12 +1,12 @@
+ {
+   "name": "cz10b-net-recovery-lab",
+-  "version": "0.1.0",
++  "version": "0.3.0",
+   "lockfileVersion": 3,
+   "requires": true,
+   "packages": {
+     "": {
+       "name": "cz10b-net-recovery-lab",
+-      "version": "0.1.0",
++      "version": "0.3.0",
+       "workspaces": [
+         "apps/*",
+         "packages/*"
+@@ -23,11 +23,11 @@
+     },
+     "apps/web": {
+       "name": "@recovery/web",
+-      "version": "0.1.0",
++      "version": "0.3.0",
+       "dependencies": {
+         "@react-three/drei": "^10.7.7",
+         "@react-three/fiber": "^9.6.1",
+-        "@recovery/sim-core": "0.1.0",
++        "@recovery/sim-core": "0.3.0",
+         "echarts": "^6.1.0",
+         "lucide-react": "^0.548.0",
+         "react": "^19.2.7",
+@@ -3006,7 +3006,7 @@
+     },
+     "packages/sim-core": {
+       "name": "@recovery/sim-core",
+-      "version": "0.1.0"
++      "version": "0.3.0"
+     }
+   }
+ }
+diff --git a/package.json b/package.json
+index bbac8bd7f93106f97efb65b41f42406b394c637a..39dc04a020c9d15e362e2dac9e2eeee3916acda4 100644
+--- a/package.json
++++ b/package.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "cz10b-net-recovery-lab",
+-  "version": "0.1.0",
++  "version": "0.3.0",
+   "private": true,
+   "type": "module",
+   "workspaces": [
+@@ -15,7 +15,9 @@
+     "test:watch": "vitest",
+     "test:core": "vitest run packages/sim-core",
+     "lab": "tsx tools/run-scenario.ts",
+-    "lab:monte-carlo": "tsx tools/run-monte-carlo.ts"
++    "lab:monte-carlo": "tsx tools/run-monte-carlo.ts",
++    "lab:validate": "tsx tools/run-validation.ts",
++    "lab:sensitivity": "tsx tools/run-sensitivity.ts"
+   },
+   "devDependencies": {
+     "@types/node": "^24.0.0",
+diff --git a/packages/sim-core/package.json b/packages/sim-core/package.json
+index 382d512f656dbd61782b4ee566b4c6fb70909247..3eeb669ab829340750166ee09f3f2e08d9d02c07 100644
+--- a/packages/sim-core/package.json
++++ b/packages/sim-core/package.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "@recovery/sim-core",
+-  "version": "0.1.0",
++  "version": "0.3.0",
+   "private": true,
+   "type": "module",
+   "exports": {
+diff --git a/packages/sim-core/src/config.ts b/packages/sim-core/src/config.ts
+index df401e60984fe9f45bd87f0819e12ebc13d95a6b..f2170831a7e618f43e1c794739a8a0fb9cbd5291 100644
+--- a/packages/sim-core/src/config.ts
++++ b/packages/sim-core/src/config.ts
+@@ -1,4 +1,5 @@
+ import type { ParameterSource, ScenarioConfig } from "./contracts";
++import { crc32, stableStringify } from "./comms/protocol";
+ 
+ const source = (status: ParameterSource["status"], sourceText: string, note: string): ParameterSource => ({
+   status,
+@@ -6,8 +7,11 @@ const source = (status: ParameterSource["status"], sourceText: string, note: str
+   note
+ });
+ 
++export const fingerprintScenarioConfig = (config: ScenarioConfig): string =>
++  crc32(stableStringify(config)).toString(16).padStart(8, "0");
++
+ export const createNominalScenario = (): ScenarioConfig => ({
+-  schemaVersion: 1,
++  schemaVersion: 2,
+   id: "nominal-cooperative",
+   name: "标称协同捕获",
+   description: "公开机理约束下的候选闭环；数值参数为截图标定或研究假设。",
+@@ -106,19 +110,48 @@ export const createNominalScenario = (): ScenarioConfig => ({
+     corruptionRate: 0.0002,
+     bandwidthPacketsPerSecond: 1_000
+   },
++  faults: {
++    radioBlackout: { enabled: false, startTimeS: 10, durationS: 2 },
++    winchStuck: {
++      enabled: false,
++      node: "winch-x-positive",
++      startTimeS: 14,
++      durationS: 8
++    },
++    sensorBiasStep: {
++      enabled: false,
++      startTimeS: 8,
++      durationS: 6,
++      deltaM: [1, -0.6, 0.3]
++    },
++    thrustScale: {
++      enabled: false,
++      startTimeS: 10,
++      durationS: 6,
++      scale: 0.65
++    }
++  },
+   parameterSources: {
+     "rocket.lengthM": source("public-estimate", "公开整箭长度约 63 m；一级长度未公开", "43 m 为终端代理模型尺寸"),
+     "rocket.radiusM": source("official", "官方公开整箭直径 5 m", "代理模型半径取 2.5 m"),
+     "rocket.massKg": source("calibrated", "用户截图的稳态约 400 kN 与约 1 g", "仅为等效回收质量，不是官方一级质量"),
++    "rocket.initialVelocityMps.2": source("assumed", "公开报道未披露入网垂向速度", "-58 m/s 为终端下降代理初值；敏感性分析按幅值扰动"),
+     "net.openHalfSpacingM": source("calibrated", "用户截图", "不是官方网系尺寸"),
+     "net.closedHalfSpacingM": source("calibrated", "用户截图", "不是官方捕获阈值"),
+     "net.totalStiffnessNpm": source("calibrated", "用户截图与等效停止距离", "四绳总等效值"),
+     "net.totalDampingNspm": source("calibrated", "约 9 m/s 捕获速度对应约 0.95 MN 阻尼峰值", "四绳总等效值"),
++    "net.totalStrengthLimitN": source("assumed", "真实网系极限载荷未公开", "仅作为代理断绳状态阈值，不是结构许用载荷"),
+     "net.winchMaxSpeedMps": source("assumed", "真实绞盘运动能力未公开", "满足 21 m 到 3 m 的 5.5 s 最小加加速度轨迹"),
+     "controller.attitudeGains": source("assumed", "真实姿态控制律与带宽未公开", "按代理刚体惯量调至阻尼充足且不超过力矩限幅"),
+     "controller.requiredApertureMarginM": source("assumed", "真实挂索几何与允许偏差未公开", "等效刚体捕获判据的研究余量"),
++    "radio.baseLatencyMs": source("assumed", "真实无线链路时延未公开", "45 ms 为闭环压力测试的代理基线"),
++    "radio.lossRate": source("assumed", "真实无线链路可靠性未公开", "2% 为随机丢包代理基线"),
++    "sensors.rocketPositionNoiseM": source("assumed", "真实箭上导航精度未公开", "0.35 m 为估计器对照所用噪声标准差"),
++    "controller.netCenterKp": source("calibrated", "依据当前代理平台与绞盘响应整定", "仅保证本模型闭环阻尼与限幅行为"),
++    "controller.staleTelemetryAbortS": source("assumed", "真实失联处置门限未公开", "0.8 s 为代理监督状态机中止阈值"),
+     radio: source("assumed", "真实通信体制未公开", "用于压力测试的候选链路"),
+-    sensors: source("assumed", "真实传感器配置未公开", "用于候选估计算法比较")
++    sensors: source("assumed", "真实传感器配置未公开", "用于候选估计算法比较"),
++    faults: source("assumed", "故障时序与幅值未公开", "仅用于闭环鲁棒性压力试验")
+   }
+ });
+ 
+diff --git a/packages/sim-core/src/contracts.ts b/packages/sim-core/src/contracts.ts
