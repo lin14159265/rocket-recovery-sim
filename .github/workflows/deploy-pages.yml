@@ -1,11 +1,9 @@
-name: 构建并发布 gh-pages 静态站点
+name: 构建并发布 GitHub Pages
 
 on:
   push:
     branches:
       - main
-  pull_request:
-    types: [opened, synchronize, reopened]
   workflow_dispatch:
 
 permissions:
@@ -48,22 +46,31 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          VERSION=$(node -p "require('./package.json').version")
+          cat > apps/web/dist/deployment.json <<EOF
+          {
+            "version": "${VERSION}",
+            "sourceSha": "${GITHUB_SHA}",
+            "site": "https://lin14159265.github.io/rocket-recovery-sim/"
+          }
+          EOF
           touch apps/web/dist/.nojekyll
           cd apps/web/dist
           git init --quiet
           git config user.name "OpenAI Codex"
           git config user.email "codex@openai.com"
           git add -A
-          git commit --quiet -m "部署 v0.3.1 静态网页"
+          git commit --quiet -m "部署 v${VERSION} 静态网页"
           git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git push --force origin HEAD:refs/heads/gh-pages
 
-      - name: 回传 gh-pages 发布状态
+      - name: 回传构建产物状态
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
+          VERSION=$(node -p "require('./package.json').version")
           mkdir -p /tmp/pages-status
           cd /tmp/pages-status
           git init --quiet
@@ -71,15 +78,15 @@ jobs:
           git config user.email "codex@openai.com"
           cat > status.json <<EOF
           {
-            "version": "0.3.1",
+            "version": "${VERSION}",
             "sourceSha": "${SOURCE_SHA}",
             "build": "success",
-            "deploy": "gh-pages-branch-ready",
+            "deploy": "gh-pages-artifact-published",
             "pageUrl": "https://lin14159265.github.io/rocket-recovery-sim/",
             "updatedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           }
           EOF
           git add status.json
-          git commit --quiet -m "记录 v0.3.1 gh-pages 发布状态"
+          git commit --quiet -m "记录 v${VERSION} GitHub Pages 构建状态"
           git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git push --force origin HEAD:refs/heads/pages-deployment-status
