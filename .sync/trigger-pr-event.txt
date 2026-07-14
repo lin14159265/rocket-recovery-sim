@@ -1,1 +1,1 @@
-触发 v0.3.1 最终发布：先推送不含工作流文件的已验证源码，再部署 GitHub Pages。
+触发 GitHub Pages 工作流 PR 诊断，定位 build 作业失败步骤。
