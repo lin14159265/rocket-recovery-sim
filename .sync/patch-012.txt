@@ -1,0 +1,221 @@
+     const second = runSimulation(createNominalScenario(), { frameRateHz: 2 });
+@@ -44,6 +56,19 @@ describe("multi-rate recovery simulation", () => {
+     expect(second.finalSnapshot.radioStats).toEqual(first.finalSnapshot.radioStats);
+   });
+ 
++  it("identifies the model version and exact configuration", () => {
++    const baseline = runSimulation(createNominalScenario(), { frameRateHz: 1 });
++    const changedConfig = createNominalScenario();
++    changedConfig.rocket.massKg += 1;
++    const changed = runSimulation(changedConfig, { frameRateHz: 1 });
++
++    expect(baseline.modelVersion).toMatch(/^0\.3\./);
++    expect(baseline.configFingerprint).toMatch(/^[0-9a-f]{8}$/);
++    expect(changed.configFingerprint).not.toBe(baseline.configFingerprint);
++    expect(baseline.finalSnapshot.runId).toContain(baseline.configFingerprint);
++    expect(baseline.finalSnapshot.runId).toContain(baseline.config.controller.algorithm);
++  });
++
+   it("cannot magically capture through a sustained radio blackout", () => {
+     const run = runSimulation(createNominalScenario(), {
+       frameRateHz: 2,
+@@ -71,4 +96,24 @@ describe("multi-rate recovery simulation", () => {
+     expect(run.metrics.failed).toBe(true);
+     expect(run.metrics.failureReason).toMatch(/winch unavailable/);
+   });
++  it("records scenario-defined fault activation and clearing", () => {
++    const config = createNominalScenario();
++    config.durationS = 0.08;
++    config.faults.sensorBiasStep = {
++      enabled: true,
++      startTimeS: 0.01,
++      durationS: 0.02,
++      deltaM: [1, 0, 0]
++    };
++    const run = runSimulation(config, { frameRateHz: 20 });
++    const faultEvents = run.events.filter((event) =>
++      event.type === "FAULT_INJECTED" || event.type === "FAULT_CLEARED"
++    );
++    expect(faultEvents.map((event) => event.type)).toEqual([
++      "FAULT_INJECTED",
++      "FAULT_CLEARED"
++    ]);
++    expect(faultEvents[0]?.message).toMatch(/导航偏置阶跃/);
++  });
++
+ });
+diff --git a/packages/sim-core/tests/validation.test.ts b/packages/sim-core/tests/validation.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..179430140dd5a7796cb210e7a50b4efdd9de7ec1
+--- /dev/null
++++ b/packages/sim-core/tests/validation.test.ts
+@@ -0,0 +1,47 @@
++import { describe, expect, it } from "vitest";
++import {
++  createNominalScenario,
++  evaluateEnergyBalance,
++  runLocalSensitivity,
++  runSimulation,
++  runStepConvergenceStudy
++} from "../src";
++
++describe("model validation utilities", () => {
++  it("produces finite step convergence comparisons", () => {
++    const config = createNominalScenario();
++    config.durationS = 1;
++    const report = runStepConvergenceStudy(config);
++    expect(report.cases).toHaveLength(3);
++    expect(report.comparisons).toHaveLength(2);
++    expect(Number.isFinite(report.comparisons[0]!.maximumNormalizedDifference)).toBe(true);
++  });
++
++  it("returns a bounded energy report even without contact", () => {
++    const config = createNominalScenario();
++    config.durationS = 0.2;
++    const report = evaluateEnergyBalance(runSimulation(config, { frameRateHz: 50 }));
++    expect(report.contactDetected).toBe(false);
++    expect(Number.isFinite(report.normalizedResidual)).toBe(true);
++  });
++
++  it("does not double-count final elastic storage as damping dissipation", () => {
++    const config = createNominalScenario();
++    const report = evaluateEnergyBalance(runSimulation(config, { frameRateHz: 100, stopOnTerminal: true }));
++    expect(report.contactDetected).toBe(true);
++    expect(report.contactWorkProxyJ).toBeGreaterThanOrEqual(report.contactDissipationProxyJ);
++    expect(report.contactDissipationProxyJ + report.finalElasticProxyJ)
++      .toBeCloseTo(report.contactWorkProxyJ, -3);
++  });
++
++  it("builds deterministic local sensitivity rows", () => {
++    const config = createNominalScenario();
++    config.durationS = 0.1;
++    const first = runLocalSensitivity(config);
++    const second = runLocalSensitivity(config);
++    expect(first).toEqual(second);
++    expect(first.rows.every((row) => row.sensitivityScore !== null)).toBe(true);
++    expect(first.rows.every((row) => row.source.source.length > 0)).toBe(true);
++    expect(first.rows.every((row) => row.dominantEffectChangePercent !== null)).toBe(true);
++  });
++});
+diff --git a/tools/run-sensitivity.ts b/tools/run-sensitivity.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..48cae70d01e1e20d2a7987b732b550424b9ad779
+--- /dev/null
++++ b/tools/run-sensitivity.ts
+@@ -0,0 +1,53 @@
++import { createNominalScenario, createPresetScenario } from "../packages/sim-core/src/config";
++import type { ScenarioConfig } from "../packages/sim-core/src/contracts";
++import { runLocalSensitivity } from "../packages/sim-core/src/traceability";
++
++type Preset = Parameters<typeof createPresetScenario>[0];
++
++const presets = new Set<Preset>([
++  "nominal",
++  "late-close",
++  "low-damping",
++  "overload",
++  "radio-blackout"
++]);
++
++const valueAfter = (flag: string): string | undefined => {
++  const index = process.argv.indexOf(flag);
++  return index < 0 ? undefined : process.argv[index + 1];
++};
++
++const loadPreset = (): ScenarioConfig => {
++  const preset = (valueAfter("--preset") ?? "nominal") as Preset;
++  if (!presets.has(preset)) throw new Error(`未知场景：${preset}`);
++  return preset === "nominal" ? createNominalScenario() : createPresetScenario(preset);
++};
++
++if (process.argv.includes("--help")) {
++  console.log("用法：npm run lab:sensitivity -- [--preset nominal] [--json]");
++} else {
++  const config = loadPreset();
++  const result = runLocalSensitivity(config, ({ completed, total, label }) => {
++    if (!process.argv.includes("--json")) console.log(`[${completed}/${total}] ${label}`);
++  });
++
++  if (process.argv.includes("--json")) {
++    console.log(JSON.stringify(result, null, 2));
++  } else {
++    console.log("\n参数—证据—敏感性追溯（仅适用于当前代理场景附近）");
++    console.table(result.rows.map((row) => ({
++      参数: row.label,
++      路径: row.path,
++      值: `${row.value} ${row.unit}`.trim(),
++      证据等级: row.source.status,
++      扰动: `${row.perturbationPercent}%`,
++      敏感性: row.sensitivityLevel,
++      系数: row.sensitivityScore?.toFixed(3) ?? "—",
++      主导指标: row.dominantEffect ?? "—",
++      "指标变化": row.dominantEffectChangePercent === null
++        ? "—"
++        : `${row.dominantEffectChangePercent.toFixed(2)}%`
++    })));
++    console.log(result.notice);
++  }
++}
+diff --git a/tools/run-validation.ts b/tools/run-validation.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..2b019e43284a8b6da15b7e2f9442dadda29c5e60
+--- /dev/null
++++ b/tools/run-validation.ts
+@@ -0,0 +1,57 @@
++import { createNominalScenario, createPresetScenario } from "../packages/sim-core/src/config";
++import type { ScenarioConfig } from "../packages/sim-core/src/contracts";
++import { runValidationSuite } from "../packages/sim-core/src/validation";
++
++type Preset = Parameters<typeof createPresetScenario>[0];
++
++const presets = new Set<Preset>([
++  "nominal",
++  "late-close",
++  "low-damping",
++  "overload",
++  "radio-blackout"
++]);
++
++const valueAfter = (flag: string): string | undefined => {
++  const index = process.argv.indexOf(flag);
++  return index < 0 ? undefined : process.argv[index + 1];
++};
++
++const loadPreset = (): ScenarioConfig => {
++  const preset = (valueAfter("--preset") ?? "nominal") as Preset;
++  if (!presets.has(preset)) throw new Error(`未知场景：${preset}`);
++  return preset === "nominal" ? createNominalScenario() : createPresetScenario(preset);
++};
++
++if (process.argv.includes("--help")) {
++  console.log("用法：npm run lab:validate -- [--preset nominal] [--json]");
++} else {
++  const config = loadPreset();
++  const result = runValidationSuite(config, {
++    onProgress: ({ completed, total, label }) => {
++      if (!process.argv.includes("--json")) console.log(`[${completed}/${total}] ${label}`);
++    }
++  });
++
++  if (process.argv.includes("--json")) {
++    console.log(JSON.stringify(result, null, 2));
++  } else {
++    console.log("\n公开机理代理模型数值验证（不构成真实型号验证）");
++    console.log(`场景：${config.name}　物理步长：${config.physicsDtS} s`);
++    console.table(result.convergence.comparisons.map((comparison) => ({
++      步长对: `${comparison.coarseDtS} → ${comparison.fineDtS} s`,
++      最大归一差: `${(comparison.maximumNormalizedDifference * 100).toFixed(2)}%`,
++      终态一致: comparison.categoricalAgreement ? "是" : "否"
++    })));
++    console.log(`收敛分级：${result.convergence.quality}；${result.convergence.interpretation}`);
++    console.log(
++      `能量账本：${result.energy.quality}；未观测残差 ${(result.energy.normalizedResidual * 100).toFixed(2)}%`
++    );
++    console.log(
++      `接触净做功代理 ${(result.energy.contactWorkProxyJ / 1e6).toFixed(3)} MJ，` +
++      `阻尼耗散代理 ${(result.energy.contactDissipationProxyJ / 1e6).toFixed(3)} MJ，` +
++      `末态弹性能代理 ${(result.energy.finalElasticProxyJ / 1e6).toFixed(3)} MJ`
++    );
++    console.log(result.modelNotice);
++  }
++}
