@@ -1,1 +1,1 @@
-复查管理员身份更新 gh-pages 后，GitHub 是否自动建立 Pages 站点。
+确认 v0.3.1 GitHub Pages 站点是否已从 building 转为 built。
