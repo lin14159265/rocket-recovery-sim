@@ -1,0 +1,339 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index be077955ab523d91c01b489b9bbeb515b9a83903..568c26911c2d0ae91b276e53b0c73c16b745367b 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -28,6 +28,8 @@
+ - 测试：`npm test`
+ - 无界面名义场景：`npm run lab`
+ - Monte Carlo：`npm run lab:monte-carlo`
++- 步长与能量验证：`npm run lab:validate`
++- 参数敏感性：`npm run lab:sensitivity`
+ 
+ ## 核心约束
+ 
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..c6a4ab5cf1861332562f24cba7fd17601722e7e6
+--- /dev/null
++++ b/CHANGELOG.md
+@@ -0,0 +1,55 @@
++# 版本记录
++
++本项目采用语义化版本号。所有版本均为公开机理约束下的代理仿真软件版本，不代表真实型号数字孪生或官方实现。
++
++## v0.2.0 — 接管基线与完整实验闭环（2026-07-14）
++
++### 版本描述
++
++将原有仿真内核、三维场景和遥测组件连接为可运行、可解释、可重复实验的完整前端工作流，作为后续故障实验、验证工具和参数追溯能力的稳定基线。
++
++### 主要修改
++
++- 接通场景配置、确定性仿真、三维场景、遥测曲线和回放控制。
++- 使用 Web Worker 执行单场景和算法对照实验，避免阻塞界面。
++- 支持场景预设、参数编辑、算法切换、seed 修改及 JSON 结果导出。
++- 增加模型版本、配置指纹、运行标识和公开机理边界说明。
++- 修复 `SECURED` 状态与物理稳定判据不同步导致的提前终止问题。
++- 增加终态一致性回归测试，并完善接管审计、架构与验证文档。
++
++### 验证
++
++- TypeScript 类型检查通过。
++- 7 个测试文件、47 项测试通过。
++- 生产构建通过。
++
++## v0.3.0 — 故障注入、可验证实验与参数追溯（2026-07-14）
++
++### 中文版本描述
++
++本版本把代理仿真实验台从“可运行闭环”推进为“可注入故障、可检查数值可信度、可迁移场景、可追溯参数证据”的实验环境。所有新增结论仍限定在公开机理代理模型内部，不外推到真实型号。
++
++### 主要修改
++
++- 新增定时故障计划：无线静默、单绞盘卡滞、箭上导航偏置阶跃和推力降额。
++- 新增无线/现场总线重复包与 CRC 损坏率界面，故障启停写入事件日志。
++- 新增批量算法对照逐运行进度显示与可取消任务。
++- 新增步长收敛验证：同一场景使用 Δt、Δt/2、Δt/4 比较终态与关键连续指标。
++- 新增接触阶段代理能量账本，拆分接触净做功、末态弹性能和阻尼耗散代理，显式报告未观测残差，不将其包装成结构能量认证。
++- 新增场景 JSON 导入、结构校验和 v1 → v2 迁移；拒绝未来未知 schema。
++- 新增“参数—证据—敏感性”追溯页，支持十项关键参数的确定性单因素局部敏感性系数计算。
++- 新增无界面 `lab:validate` 与 `lab:sensitivity` 入口，便于保存 JSON 实验记录。
++- 场景 schema 升级到 v2，模型版本与三个工作区包版本统一为 0.3.0。
++
++### 兼容性
++
++- 可导入 v1 原始场景配置。
++- 可导入 v0.2 导出的 `recovery-proxy-scenario` 文档包。
++- 导出格式升级为 documentVersion 2。
++
++### 验证
++
++- TypeScript 类型检查通过。
++- 9 个测试文件、59 项测试通过。
++- 生产构建通过。
++- 标称单场景、数值验证和参数敏感性命令行烟雾测试通过。
+diff --git a/README.md b/README.md
+index b20a35fda50721631150e42c91837ff985130c98..74be60d8a2aa4af9736a9581af7ab0d6604b45f3 100644
+--- a/README.md
++++ b/README.md
+@@ -12,20 +12,37 @@
+ 
+ 来源与参数分级见 [公开资料与模型边界](docs/公开资料与模型边界.md)。
+ 
+-## 第一阶段能力
++## 当前能力
+ 
+ - 三维刚体终端下降、风浪扰动、平台运动和四绳等效接触。
+ - 火箭—平台无线代理链路与平台—绞盘现场总线代理。
+ - 带时间戳/有效期/CRC 的消息、时延、抖动、丢包、乱序和重复。
+ - 基础追踪与预测协同两种算法，可对比固定网、闭环协同和故障场景。
+-- 播放、暂停、单步、拖动回放、实时曲线和事件日志。
+-- Node 无界面回归与 Monte Carlo。
++- 播放、暂停、前后单帧、拖动回放、实时曲线和事件日志。
++- 参数来源分级、模型边界说明、相同 seed 重算和版本化 JSON 导入/导出。
++- 四类定时故障注入：无线静默、单绞盘卡滞、导航偏置阶跃和推力降额。
++- Web Worker 后台单场景、有界扰动算法对照、步长/能量验证和局部敏感性计算。
++- 批量实验逐运行进度、取消操作与结果汇总。
++- Δt、Δt/2、Δt/4 步长收敛检查和接触阶段代理能量账本。
++- “参数—证据—敏感性”追溯表与 Node 无界面复现实验入口。
+ 
+ ## 运行
+ 
+ ```powershell
+-npm install
++npm ci
+ npm run dev
+ ```
+ 
+-更多命令见根目录 [AGENTS.md](AGENTS.md)。
++质量检查：
++
++```powershell
++npm run typecheck
++npm test
++npm run build
++npm run lab
++npm run lab:monte-carlo -- --runs 5
++npm run lab:validate
++npm run lab:sensitivity
++```
++
++更多命令见根目录 [AGENTS.md](AGENTS.md)。当前完成度、修复记录和已知限制见 [接管审计与实现状态](docs/接管审计与实现状态.md)。场景兼容规则见 [场景格式与版本迁移](docs/场景格式与版本迁移.md)，证据与敏感性方法见 [参数证据与敏感性追溯](docs/参数证据与敏感性追溯.md)。
+diff --git a/apps/web/package.json b/apps/web/package.json
+index f0def9a5190f6e9b885f1d26d59f15708da6ca21..2e3b042aa8cd307a75f49a451e4efa3f2b7f5692 100644
+--- a/apps/web/package.json
++++ b/apps/web/package.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "@recovery/web",
+-  "version": "0.1.0",
++  "version": "0.3.0",
+   "private": true,
+   "type": "module",
+   "scripts": {
+@@ -11,7 +11,7 @@
+   "dependencies": {
+     "@react-three/drei": "^10.7.7",
+     "@react-three/fiber": "^9.6.1",
+-    "@recovery/sim-core": "0.1.0",
++    "@recovery/sim-core": "0.3.0",
+     "echarts": "^6.1.0",
+     "lucide-react": "^0.548.0",
+     "react": "^19.2.7",
+diff --git a/apps/web/src/App.tsx b/apps/web/src/App.tsx
+index 44b0762145106d701b2be93ed0b04485a42bac97..24f327a88d1359154a5d308134275787433c1e52 100644
+--- a/apps/web/src/App.tsx
++++ b/apps/web/src/App.tsx
+@@ -1,12 +1,467 @@
++import { useCallback, useEffect, useMemo, useRef, useState } from "react";
++import {
++  createNominalScenario,
++  createPresetScenario,
++  createScenarioDocument,
++  migrateScenarioDocument,
++  type AlgorithmMode,
++  type ParameterTraceabilityResult,
++  type ScenarioConfig,
++  type ScenarioFaultConfig,
++  type SimulationRun,
++  type SimulationSnapshot,
++  type ValidationSuiteResult
++} from "@recovery/sim-core";
++import {
++  Dashboard,
++  type DashboardParameterKey,
++  type DashboardPreset,
++  type InspectorTab,
++  type MonteCarloSummary,
++  type TaskProgress
++} from "./components/Dashboard";
++import type {
++  SimulationWorkerRequest,
++  SimulationWorkerResponse,
++  WorkerTask
++} from "./workers/protocol";
++
++type AnalysisWorkerRequest = Exclude<SimulationWorkerRequest, { kind: "run" }>;
++type WithoutRequestId<T> = T extends unknown ? Omit<T, "requestId"> : never;
++
++const cloneConfig = (config: ScenarioConfig): ScenarioConfig => structuredClone(config);
++
++const frameAtTime = (
++  frames: readonly SimulationSnapshot[],
++  timeS: number
++): SimulationSnapshot | null => {
++  if (frames.length === 0) return null;
++  let low = 0;
++  let high = frames.length - 1;
++  let match = 0;
++  while (low <= high) {
++    const middle = Math.floor((low + high) / 2);
++    const frame = frames[middle];
++    if (frame === undefined) break;
++    if (frame.timeS <= timeS) {
++      match = middle;
++      low = middle + 1;
++    } else {
++      high = middle - 1;
++    }
++  }
++  return frames[match] ?? null;
++};
++
++const patchParameter = (
++  source: ScenarioConfig,
++  path: DashboardParameterKey,
++  value: number
++): ScenarioConfig => {
++  const config = cloneConfig(source);
++  switch (path) {
++    case "rocket.massKg": config.rocket.massKg = value; break;
++    case "rocket.initialVelocityMps.2": config.rocket.initialVelocityMps[2] = value; break;
++    case "rocket.thrustMaxN": config.rocket.thrustMaxN = value; break;
++    case "net.closureDurationS": config.net.closureDurationS = value; break;
++    case "net.totalStiffnessNpm": config.net.totalStiffnessNpm = value; break;
++    case "net.totalDampingNspm": config.net.totalDampingNspm = value; break;
++    case "net.totalStrengthLimitN": config.net.totalStrengthLimitN = value; break;
++    case "radio.baseLatencyMs": config.radio.baseLatencyMs = value; break;
++    case "radio.jitterMs": config.radio.jitterMs = value; break;
++    case "radio.lossRate": config.radio.lossRate = value; break;
++    case "radio.duplicateRate": config.radio.duplicateRate = value; break;
++    case "radio.corruptionRate": config.radio.corruptionRate = value; break;
++    case "fieldbus.baseLatencyMs": config.fieldbus.baseLatencyMs = value; break;
++    case "fieldbus.jitterMs": config.fieldbus.jitterMs = value; break;
++    case "fieldbus.lossRate": config.fieldbus.lossRate = value; break;
++    case "fieldbus.duplicateRate": config.fieldbus.duplicateRate = value; break;
++    case "fieldbus.corruptionRate": config.fieldbus.corruptionRate = value; break;
++    case "controller.netCenterKp": config.controller.netCenterKp = value; break;
++    case "controller.netCenterKd": config.controller.netCenterKd = value; break;
++    case "controller.staleTelemetryAbortS": config.controller.staleTelemetryAbortS = value; break;
++    case "faults.radioBlackout.startTimeS": config.faults.radioBlackout.startTimeS = value; break;
++    case "faults.radioBlackout.durationS": config.faults.radioBlackout.durationS = value; break;
++    case "faults.winchStuck.startTimeS": config.faults.winchStuck.startTimeS = value; break;
++    case "faults.winchStuck.durationS": config.faults.winchStuck.durationS = value; break;
++    case "faults.sensorBiasStep.startTimeS": config.faults.sensorBiasStep.startTimeS = value; break;
++    case "faults.sensorBiasStep.durationS": config.faults.sensorBiasStep.durationS = value; break;
++    case "faults.sensorBiasStep.deltaM.0": config.faults.sensorBiasStep.deltaM[0] = value; break;
++    case "faults.sensorBiasStep.deltaM.1": config.faults.sensorBiasStep.deltaM[1] = value; break;
++    case "faults.sensorBiasStep.deltaM.2": config.faults.sensorBiasStep.deltaM[2] = value; break;
++    case "faults.thrustScale.startTimeS": config.faults.thrustScale.startTimeS = value; break;
++    case "faults.thrustScale.durationS": config.faults.thrustScale.durationS = value; break;
++    case "faults.thrustScale.scale": config.faults.thrustScale.scale = value; break;
++  }
++  config.id = "custom";
++  config.name = "自定义代理场景";
++  config.parameterSources[path] = {
++    status: "assumed",
++    source: "用户界面覆盖",
++    note: "本次自定义场景值；不代表公开或官方参数"
++  };
++  return config;
++};
++
++const algorithmLabel = (algorithm: AlgorithmMode): string => {
++  if (algorithm === "fixed") return "固定网";
++  if (algorithm === "alpha-beta") return "α–β 协同";
++  return "预测协同";
++};
++
++const toMonteCarloSummary = (
++  result: Extract<SimulationWorkerResponse, { kind: "comparison-result" }>["result"]
++): MonteCarloSummary => ({
++  sampleCount: result.samplesPerVariant,
++  variants: result.variants.map((variant) => ({
++    id: variant.algorithm,
++    label: algorithmLabel(variant.algorithm),
++    algorithm: variant.algorithm,
++    runs: variant.runs,
++    captures: variant.captures,
++    secured: variant.secured,
++    captureRate: variant.captureRate,
++    securedRate: variant.securedRate,
++    meanPeakLoadKn: variant.meanPeakLoadN / 1_000,
++    p95PeakLoadKn: variant.p95PeakLoadN / 1_000
++  }))
++});
++
++const downloadJson = (filename: string, payload: unknown): void => {
++  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
++  const url = URL.createObjectURL(blob);
++  const anchor = document.createElement("a");
++  anchor.href = url;
++  anchor.download = filename;
++  document.body.append(anchor);
++  anchor.click();
++  anchor.remove();
++  URL.revokeObjectURL(url);
++};
++
+ export function App() {
++  const [config, setConfig] = useState<ScenarioConfig>(() => createNominalScenario());
++  const [run, setRun] = useState<SimulationRun | null>(null);
++  const [currentTimeS, setCurrentTimeS] = useState(0);
++  const [playing, setPlaying] = useState(false);
++  const [speed, setSpeed] = useState(1);
++  const [busy, setBusy] = useState(false);
++  const [dirty, setDirty] = useState(false);
++  const [error, setError] = useState<string | null>(null);
++  const [selectedInspectorTab, setSelectedInspectorTab] = useState<InspectorTab>("scenario");
++  const [monteCarloSummary, setMonteCarloSummary] = useState<MonteCarloSummary | null>(null);
++  const [validationResult, setValidationResult] = useState<ValidationSuiteResult | null>(null);
++  const [traceabilityResult, setTraceabilityResult] = useState<ParameterTraceabilityResult | null>(null);
++  const [activeTask, setActiveTask] = useState<WorkerTask | null>(null);
++  const [taskProgress, setTaskProgress] = useState<TaskProgress | null>(null);
++  const [importNotice, setImportNotice] = useState<string | null>(null);
++
++  const runWorkerRef = useRef<Worker | null>(null);
++  const analysisWorkerRef = useRef<Worker | null>(null);
++  const runRequestIdRef = useRef(0);
++  const analysisRequestIdRef = useRef(0);
++
++  const clearDerivedResults = useCallback(() => {
++    setMonteCarloSummary(null);
++    setValidationResult(null);
++    setTraceabilityResult(null);
++  }, []);
++
++  const runScenario = useCallback((nextConfig: ScenarioConfig) => {
++    runWorkerRef.current?.terminate();
++    const requestId = runRequestIdRef.current + 1;
++    runRequestIdRef.current = requestId;
++    const worker = new Worker(new URL("./workers/simulation.worker.ts", import.meta.url), {
++      type: "module"
++    });
++    runWorkerRef.current = worker;
++    setBusy(true);
++    setPlaying(false);
++    setError(null);
++
++    worker.onmessage = (event: MessageEvent<SimulationWorkerResponse>) => {
++      const response = event.data;
++      if (response.requestId !== runRequestIdRef.current) return;
++      if (response.kind === "error") {
++        setError(`单场景仿真失败：${response.message}`);
++        setBusy(false);
++        worker.terminate();
++        if (runWorkerRef.current === worker) runWorkerRef.current = null;
++        return;
++      }
++      if (response.kind !== "run-result") return;
