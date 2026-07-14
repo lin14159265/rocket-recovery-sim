@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
@@ -43,10 +43,35 @@ jobs:
           GITHUB_PAGES: "true"
         run: npm run build
 
-      - name: 配置并启用 GitHub Pages
+      - name: 启用 GitHub Actions Pages 构建源
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          API="https://api.github.com/repos/${GITHUB_REPOSITORY}/pages"
+          COMMON=(-H "Accept: application/vnd.github+json" -H "Authorization: Bearer ${GH_TOKEN}" -H "X-GitHub-Api-Version: 2022-11-28")
+          GET_CODE=$(curl --silent --show-error --output /tmp/pages-get.json --write-out '%{http_code}' "${COMMON[@]}" "$API")
+          if [ "$GET_CODE" = "404" ]; then
+            CREATE_CODE=$(curl --silent --show-error --output /tmp/pages-create.json --write-out '%{http_code}' --request POST "${COMMON[@]}" "$API" --data '{"build_type":"workflow"}')
+            if [ "$CREATE_CODE" != "201" ] && [ "$CREATE_CODE" != "409" ]; then
+              cat /tmp/pages-create.json
+              echo "创建 Pages 站点失败，HTTP ${CREATE_CODE}"
+              exit 1
+            fi
+          elif [ "$GET_CODE" != "200" ]; then
+            cat /tmp/pages-get.json
+            echo "读取 Pages 站点失败，HTTP ${GET_CODE}"
+            exit 1
+          fi
+          UPDATE_CODE=$(curl --silent --show-error --output /tmp/pages-update.json --write-out '%{http_code}' --request PUT "${COMMON[@]}" "$API" --data '{"build_type":"workflow"}')
+          if [ "$UPDATE_CODE" != "204" ]; then
+            cat /tmp/pages-update.json
+            echo "切换 Pages 构建源失败，HTTP ${UPDATE_CODE}"
+            exit 1
+          fi
+
+      - name: 配置 GitHub Pages
         uses: actions/configure-pages@v5
-        with:
-          enablement: true
 
       - name: 上传静态站点
         uses: actions/upload-pages-artifact@v4
@@ -60,7 +85,44 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
+    outputs:
+      page_url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: 部署到 GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+
+  report:
+    name: 回传部署状态
+    if: always()
+    needs: [build, deploy]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BUILD_RESULT: ${{ needs.build.result }}
+      DEPLOY_RESULT: ${{ needs.deploy.result }}
+      PAGE_URL: ${{ needs.deploy.outputs.page_url }}
+      SOURCE_SHA: ${{ github.sha }}
+    steps:
+      - name: 写入独立状态分支
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/pages-status
+          cd /tmp/pages-status
+          git init --quiet
+          git config user.name "OpenAI Codex"
+          git config user.email "codex@openai.com"
+          cat > status.json <<EOF
+          {
+            "version": "0.3.1",
+            "sourceSha": "${SOURCE_SHA}",
+            "build": "${BUILD_RESULT}",
+            "deploy": "${DEPLOY_RESULT}",
+            "pageUrl": "${PAGE_URL}",
+            "updatedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          EOF
+          git add status.json
+          git commit --quiet -m "记录 v0.3.1 GitHub Pages 部署状态"
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push --force origin HEAD:refs/heads/pages-deployment-status
