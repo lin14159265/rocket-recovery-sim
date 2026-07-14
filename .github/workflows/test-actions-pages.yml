@@ -1,0 +1,77 @@
+name: 验证 GitHub Actions Pages 原生部署
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: test-actions-pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: 构建 Pages 产物
+        env:
+          GITHUB_PAGES: "true"
+        run: npm run build
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: apps/web/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    outputs:
+      page_url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: 原生部署 Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  report:
+    if: always()
+    needs: [build, deploy]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BUILD_RESULT: ${{ needs.build.result }}
+      DEPLOY_RESULT: ${{ needs.deploy.result }}
+      PAGE_URL: ${{ needs.deploy.outputs.page_url }}
+      SOURCE_SHA: ${{ github.sha }}
+    steps:
+      - name: 回传原生部署测试状态
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/status && cd /tmp/status
+          git init --quiet
+          git config user.name "OpenAI Codex"
+          git config user.email "codex@openai.com"
+          cat > status.json <<EOF
+          {
+            "sourceSha": "${SOURCE_SHA}",
+            "build": "${BUILD_RESULT}",
+            "deploy": "${DEPLOY_RESULT}",
+            "pageUrl": "${PAGE_URL}"
+          }
+          EOF
+          git add status.json
+          git commit --quiet -m "记录 GitHub Actions Pages 原生部署测试"
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push --force origin HEAD:refs/heads/pages-actions-test-status
