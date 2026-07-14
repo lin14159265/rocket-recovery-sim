@@ -1,0 +1,346 @@
++
++.reproducibility-box button:hover,
++.export-actions button:hover {
++  border-color: #48a7e5;
++  color: #eff9ff;
++}
++
++.export-actions {
++  display: grid;
++  grid-template-columns: repeat(2, minmax(0, 1fr));
++  gap: 7px;
++  margin-top: 8px;
++}
++
++.export-actions button {
++  width: 100%;
++  color: #9fb2c1;
++  background: #0c1925;
++}
++
++.reproducibility-note {
++  margin: 9px 0 0;
++  color: #667b8f;
++  font-size: 8.5px;
++  line-height: 1.5;
++}
++
++@media (max-width: 760px) {
++  .boundary-grid {
++    grid-template-columns: 1fr;
++  }
++
++  .boundary-grid article {
++    min-height: 0;
++  }
++
++  .reproducibility-box {
++    grid-template-columns: 1fr;
++  }
++}
++
++.panel-loading {
++  position: absolute;
++  inset: 0;
++  z-index: 2;
++  display: grid;
++  place-items: center;
++  color: #74899c;
++  background: #08131e;
++  font-size: 11px;
++  letter-spacing: 0.06em;
++}
++
++.step-button {
++  display: inline-grid;
++  place-items: center;
++  width: 42px;
++  height: 50px;
++  padding: 0;
++  border: 1px solid #2a4053;
++  border-radius: 5px;
++  color: #8ea5b8;
++  background: #0b1925;
++  cursor: pointer;
++}
++
++.step-button:hover {
++  color: #d9effc;
++  border-color: #47718f;
++}
++
++.monte-carlo-controls button.is-cancel {
++  color: #ffd6dc;
++  border-color: rgba(255, 86, 104, 0.62);
++  background: rgba(112, 24, 38, 0.22);
++}
++
++.inline-warning {
++  margin-bottom: 9px;
++  padding: 8px 9px;
++  border: 1px solid rgba(255, 112, 76, 0.38);
++  border-radius: 4px;
++  color: #e9b29f;
++  background: rgba(92, 40, 25, 0.18);
++  font-size: 8.5px;
++  line-height: 1.5;
++}
+diff --git a/apps/web/src/workers/protocol.ts b/apps/web/src/workers/protocol.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..47b2fd4fd3ee2959334172ea6647b3a8ad37d6fd
+--- /dev/null
++++ b/apps/web/src/workers/protocol.ts
+@@ -0,0 +1,35 @@
++import type {
++  AlgorithmComparisonResult,
++  ScenarioConfig,
++  SimulationRun
++} from "@recovery/sim-core";
++
++export type SimulationWorkerRequest =
++  | {
++      requestId: number;
++      kind: "run";
++      config: ScenarioConfig;
++    }
++  | {
++      requestId: number;
++      kind: "comparison";
++      config: ScenarioConfig;
++      samplesPerVariant: number;
++    };
++
++export type SimulationWorkerResponse =
++  | {
++      requestId: number;
++      kind: "run-result";
++      run: SimulationRun;
++    }
++  | {
++      requestId: number;
++      kind: "comparison-result";
++      result: AlgorithmComparisonResult;
++    }
++  | {
++      requestId: number;
++      kind: "error";
++      message: string;
++    };
+diff --git a/apps/web/src/workers/simulation.worker.ts b/apps/web/src/workers/simulation.worker.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..7e66e2a64d2f0ddc09a74952f647a8632d210647
+--- /dev/null
++++ b/apps/web/src/workers/simulation.worker.ts
+@@ -0,0 +1,51 @@
++import {
++  runAlgorithmComparison,
++  runSimulation
++} from "@recovery/sim-core";
++import type {
++  SimulationWorkerRequest,
++  SimulationWorkerResponse
++} from "./protocol";
++
++const worker = self as DedicatedWorkerGlobalScope;
++
++worker.onmessage = (event: MessageEvent<SimulationWorkerRequest>) => {
++  const request = event.data;
++  try {
++    if (request.kind === "run") {
++      const response: SimulationWorkerResponse = {
++        requestId: request.requestId,
++        kind: "run-result",
++        run: runSimulation(request.config, {
++          frameRateHz: 30,
++          stopOnTerminal: false
++        })
++      };
++      worker.postMessage(response);
++      return;
++    }
++
++    const response: SimulationWorkerResponse = {
++      requestId: request.requestId,
++      kind: "comparison-result",
++      result: runAlgorithmComparison(request.config, {
++        samplesPerVariant: request.samplesPerVariant,
++        seed: request.config.seed,
++        simulationOptions: {
++          frameRateHz: 1,
++          stopOnTerminal: true
++        }
++      })
++    };
++    worker.postMessage(response);
++  } catch (error) {
++    const response: SimulationWorkerResponse = {
++      requestId: request.requestId,
++      kind: "error",
++      message: error instanceof Error ? error.message : String(error)
++    };
++    worker.postMessage(response);
++  }
++};
++
++export {};
+diff --git a/apps/web/vite.config.ts b/apps/web/vite.config.ts
+index 4c0ed25ee8b7f81846328d822895ffd05f3a35eb..339694439fbb915612fd2268e6c06bd9f9e54803 100644
+--- a/apps/web/vite.config.ts
++++ b/apps/web/vite.config.ts
+@@ -2,6 +2,7 @@ import { defineConfig } from "vite";
+ import react from "@vitejs/plugin-react";
+ 
+ export default defineConfig({
++  base: "./",
+   plugins: [react()],
+   build: {
+     target: "es2022",
+diff --git "a/docs/\345\205\254\345\274\200\350\265\204\346\226\231\344\270\216\346\250\241\345\236\213\350\276\271\347\225\214.md" "b/docs/\345\205\254\345\274\200\350\265\204\346\226\231\344\270\216\346\250\241\345\236\213\350\276\271\347\225\214.md"
+index 93702061177282c7842c103a4102f490b9df6d1b..1113fefa7af178842573bfcfea4679ba589f1398 100644
+--- "a/docs/\345\205\254\345\274\200\350\265\204\346\226\231\344\270\216\346\250\241\345\236\213\350\276\271\347\225\214.md"
++++ "b/docs/\345\205\254\345\274\200\350\265\204\346\226\231\344\270\216\346\250\241\345\236\213\350\276\271\347\225\214.md"
+@@ -4,7 +4,7 @@
+ 
+ ## 官方已确认
+ 
+-1. 2026 年 7 月 10 日 12 时 15 分，长征十号乙在海南商业航天发射场发射；一二级分离约 6 分钟后，一子级垂直返回并在海上回收平台完成网系捕获。
++1. 2026 年 7 月 10 日，长征十号乙在海南商业航天发射场首飞；一子级在分离后约 6 分钟内完成返回，并由海上回收平台的网系捕获。
+ 2. 公开机械机制是回收船的“井”字形高强度缓冲阻拦索挂住箭上挂索机构。
+ 3. 官方确认的关键能力包括高精度导航控制、复杂力热环境适应和海上平台网系捕获。
+ 4. 公开整箭尺度：全长约 63 m、直径 5 m、起飞重量约 760 t、起飞推力约 890 t；这些数字不是回收时一子级质量或终端工况。
+diff --git "a/docs/\346\216\245\347\256\241\345\256\241\350\256\241\344\270\216\345\256\236\347\216\260\347\212\266\346\200\201.md" "b/docs/\346\216\245\347\256\241\345\256\241\350\256\241\344\270\216\345\256\236\347\216\260\347\212\266\346\200\201.md"
+new file mode 100644
+index 0000000000000000000000000000000000000000..0ed54ee48c48de8cdf3d1367a679e26b839bc53b
+--- /dev/null
++++ "b/docs/\346\216\245\347\256\241\345\256\241\350\256\241\344\270\216\345\256\236\347\216\260\347\212\266\346\200\201.md"
+@@ -0,0 +1,78 @@
++# 接管审计与实现状态
++
++更新日期：2026-07-14
++
++## 产品定位
++
++本工程是一套**公开机理代理仿真软件**。它用于研究候选闭环的因果链、状态机、通信退化、估计误差、执行机构约束和等效接触载荷，不是实际型号数字孪生，也不能输出真实型号成功率、结构裕度或工程验收结论。
++
++## 已打通的产品闭环
++
++```text
++场景/算法/seed
++    ↓
++Web Worker 确定性仿真
++    ↓
++SimulationRun（配置、快照、遥测、事件、指标）
++    ↓
++播放 / 暂停 / 单帧 / 拖动回放
++    ↓
++Three.js 真值与估计视图 + ECharts 遥测 + 检查器
++    ↓
++结果 JSON 导出 / 相同 seed 重算 / 有界扰动算法对照
++```
++
++已实现：
++
++- 启动后自动运行标称场景，不再停留在装载页面。
++- 场景预设、算法切换、参数编辑和显式“应用参数并重算”。
++- 播放、暂停、前后单帧、时间轴拖动和 0.25×–4× 播放速度。
++- 真实状态、地面估计和预测交会位置的三维显示。
++- 遥测曲线、状态机、通信统计、控制指令、最终指标与事件证据。
++- 参数来源分级：公开确认、公开估计、代理标定、研究假设。
++- 模型边界说明弹窗，明确可用与不可用范围。
++- 相同配置与 seed 的确定性重算；场景和完整运行结果 JSON 导出。
++- 运行结果携带模型版本、配置指纹和包含二者的运行标识，便于复核与追溯。
++- 固定网、α–β 和预测协同的成对有界扰动对照，可主动取消批量任务。
++- 单场景与批量试验均在 Web Worker 中运行，避免阻塞界面。
++- Three.js 与 ECharts 按需加载，降低首屏主包体积。
++
++## 本次修复的核心逻辑缺陷
++
++原实现启用 `stopOnTerminal` 时，协调器可能先进入 `SECURED`，但物理稳定判据尚未写入指标；程序会提前停止并返回上一帧 `ARREST`，造成状态机、最终快照和指标不一致。
++
++现已改为：
++
++1. `SECURED` 只有在物理指标也确认稳定后才允许提前停止。
++2. 终止时强制记录当前精确 tick，而不是复用上一张低频 UI 快照。
++3. `SIMULATION_FINISHED` 事件同步写回最后一帧和 `finalSnapshot`。
++4. 增加回归测试，覆盖 `stopOnTerminal` 的物理终态一致性。
++
++## 当前验证结果
++
++- TypeScript 类型检查：通过。
++- Vitest：7 个测试文件、47 个测试全部通过。
++- 生产构建：通过。
++- CLI 标称场景：`SECURED`，捕获并满足代理稳定判据。
++- 相同配置与 seed：事件、遥测、指标及最终状态可重复。
++- 持续无线黑障与绞盘卡死：明确中止，不能“神奇成功”。
++
++## 已知限制
++
++- 四根阻拦索采用 Kelvin–Voigt 集总等效模型，不含分段柔性绳、波传播、滑轮摩擦和局部结构应力。
++- 火箭气动、推力、姿态与导航均为终端阶段代理模型。
++- 姿态传感器尚未配置独立噪声参数，当前通过显式采样边界隔离真值，但仍需进一步细化。
++- 平台运动是参数化低频六自由度子集，不是海况谱或船舶水动力模型。
++- 有界扰动分布是研究假设；其统计结果只能用于模型内算法对照。
++- 浏览器批量试验默认限制为每种算法 3–20 个样本。大样本应使用 CLI，并记录硬件、版本与耗时。
++- 目前没有导入场景 JSON、实验数据库、结果签名和跨版本迁移工具。
++- 当前没有对真实硬件、半实物平台或公开试验数据进行系统辨识。
++
++## 下一阶段优先级
++
++1. 增加场景 JSON 导入、模型版本兼容检查和配置迁移。
++2. 增加批量试验进度与分批汇总；当前已支持取消，但尚无连续进度百分比。
++3. 完成步长收敛、能量平衡和接触力方向的自动验证报告。
++4. 将等效索网接口化，允许替换为分段柔性绳模型。
++5. 增加故障注入 UI：无线黑障、单绞盘卡死、传感器偏置与量测中断。
++6. 建立“假设—参数—证据—敏感性”可追溯表，而不是继续堆叠视觉效果。
+diff --git "a/docs/\347\263\273\347\273\237\346\236\266\346\236\204\350\256\276\350\256\241.md" "b/docs/\347\263\273\347\273\237\346\236\266\346\236\204\350\256\276\350\256\241.md"
+index fc08e2db204fc226146fcb1dd89da44bc78b8a1e..6d61b1d299080d7a8d49d15a1466fd50063c9dc7 100644
+--- "a/docs/\347\263\273\347\273\237\346\236\266\346\236\204\350\256\276\350\256\241.md"
++++ "b/docs/\347\263\273\347\273\237\346\236\266\346\236\204\350\256\276\350\256\241.md"
+@@ -74,3 +74,12 @@ producedTick, expiresTick, payload, crc32
+ - 网控拥有四绳位置、速度、张力与绞盘状态。
+ - 通信模块拥有序号、队列、超时、CRC 与统计。
+ - 每条控制量必须保留 `desired` 与 `applied`。
++
++## 浏览器应用层
++
++- `App`：持有场景配置、运行结果、回放时间、脏状态和错误状态。
++- `simulation.worker`：执行单场景和算法对照；新的单场景请求会终止旧 Worker，避免过期结果覆盖当前配置。
++- `Dashboard`：只消费运行结果和回调，不直接调用物理内核。
++- `RecoveryScene` / `TelemetryCharts`：按需加载，分别负责三维和曲线，不拥有控制状态。
++- 参数连续编辑只标记“待应用”；场景与算法离散切换立即重新运行，避免滑块拖动时排队大量仿真。
++- 回放读取预计算快照，不重新推进物理时间，因此显示掉帧与拖动不会改变仿真结果。
+diff --git "a/docs/\351\252\214\350\257\201\350\256\241\345\210\222.md" "b/docs/\351\252\214\350\257\201\350\256\241\345\210\222.md"
+index b8721d14d192dc96956f7181d880e12ada296e54..5ba9f0618226b60d6cd97fcc713a158bcd99ae55 100644
+--- "a/docs/\351\252\214\350\257\201\350\256\241\345\210\222.md"
++++ "b/docs/\351\252\214\350\257\201\350\256\241\345\210\222.md"
+@@ -27,7 +27,8 @@
+ - 无线 20/100/250 ms 延迟，0/5/20% 丢包，1 s 黑障。
+ - 风浪增强、初始横向偏差/速度、质量和气动误差。
+ - 单绞盘迟滞/卡死、传感器偏置和量测中断。
+-- 200–1000 个 seed 的 Monte Carlo。
++- 浏览器快速对照：每种算法 3–20 个成对样本。
++- CLI 长时间研究：200–1000 个 seed，并记录软件版本、配置哈希、硬件和耗时。
+ 
+ ## 指标
+ 
+@@ -36,4 +37,4 @@
+ - 链路 p50/p95/p99 时延、有效丢包、迟包拒绝和最长黑障。
+ - 控制计算耗时与实时因子。
+ 
+-第一阶段软件门槛：名义场景必过；名义 Monte Carlo 捕获率 >= 95%；定义为不可行的场景必须在接触前中止或明确失败。以上是软件开发门槛，不是实际型号指标。
++开发目标：名义场景必须通过；定义为不可行的场景必须在接触前中止或明确失败。高捕获率只能作为后续模型内回归目标，当前有界扰动结果尚未达到可宣称的稳健性水平，不得把目标值或模型内比例表述为实际型号指标。
+diff --git a/package-lock.json b/package-lock.json
+index 1a8fdf762a840064028ab701ba1c53b08f88304e..6261e45f5184447428103eb9990a76f4bd1bc904 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -1,12 +1,12 @@
+ {
+   "name": "cz10b-net-recovery-lab",
+-  "version": "0.1.0",
++  "version": "0.2.0",
+   "lockfileVersion": 3,
+   "requires": true,
+   "packages": {
+     "": {
+       "name": "cz10b-net-recovery-lab",
+-      "version": "0.1.0",
