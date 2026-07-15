@@ -19,6 +19,7 @@ const MESSAGE_TYPES = new Set<MessageType>([
   "VEHICLE_STATE",
   "CAPTURE_PLAN",
   "CAPTURE_READY",
+  "GUIDANCE_UPDATE",
   "COMMIT",
   "ABORT",
   "WINCH_COMMAND",

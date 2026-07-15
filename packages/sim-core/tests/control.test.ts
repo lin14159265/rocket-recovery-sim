@@ -202,10 +202,13 @@ describe("capture coordinator", () => {
     contactDetected: false,
     broken: false,
     secured: false,
+    tensionsN: [0, 0, 0, 0],
+    payoutM: 0,
+    payoutVelocityMps: 0,
     ...overrides
   });
 
-  const makeCoordinator = (): CaptureCoordinator => {
+  const makeCoordinator = (netCenterGains?: [number, number]): CaptureCoordinator => {
     const scenario = createNominalScenario();
     scenario.net.openHalfSpacingM = 6;
     scenario.net.closedHalfSpacingM = 3;
@@ -216,6 +219,10 @@ describe("capture coordinator", () => {
     scenario.controller.guidance.captureDescentSpeedMps = 0.5;
     scenario.controller.guidance.maximumDescentSpeedMps = 3;
     scenario.controller.guidance.brakingAccelerationMps2 = 0.5;
+    if (netCenterGains !== undefined) {
+      scenario.controller.netCenterKp = netCenterGains[0];
+      scenario.controller.netCenterKd = netCenterGains[1];
+    }
     return new CaptureCoordinator({
       tickDurationS: 0.1,
       controller: scenario.controller,
@@ -269,6 +276,20 @@ describe("capture coordinator", () => {
       velocity: 0,
       acceleration: 0
     });
+  });
+
+  it("uses netCenterKp/Kd in the outer net-centre response", () => {
+    const disabled = makeCoordinator([0, 0]);
+    const enabled = makeCoordinator([2.4, 1.4]);
+    step(disabled, 0, false);
+    step(enabled, 0, false);
+    step(disabled, 1, false);
+    step(enabled, 1, false);
+    const disabledResponse = step(disabled, 2, false);
+    const enabledResponse = step(enabled, 2, false);
+    expect(enabledResponse.desiredNetCenterM).not.toEqual(disabledResponse.desiredNetCenterM);
+    expect(Math.hypot(...enabledResponse.desiredNetCenterM))
+      .toBeGreaterThan(Math.hypot(...disabledResponse.desiredNetCenterM));
   });
 
   it("requires PREPARE readiness before COMMIT and changes to tension after contact", () => {
@@ -333,6 +354,31 @@ describe("capture coordinator", () => {
     expect(aborted.state).toBe("ABORT");
     expect(aborted.abortReason).toMatch(/PREPARE timed out/);
     expect(aborted.handshakePhase).toBe("ABORT");
+  });
+
+  it("does not COMMIT on a stale revision or a single unready winch", () => {
+    const coordinator = makeCoordinator();
+    step(coordinator, 0, false);
+    step(coordinator, 1, false);
+    const prepared = step(coordinator, 2, false);
+    const revision = prepared.plan?.planRevision ?? 1;
+
+    const stale = step(coordinator, 3, true, net(), -2, revision - 1);
+    expect(stale.state).toBe("SYNC");
+    expect(stale.readiness.all).toBe(false);
+
+    const partialNet = net();
+    const xNegative = partialNet.winchStatuses["winch-x-negative"];
+    if (xNegative !== null) {
+      partialNet.winchStatuses["winch-x-negative"] = {
+        ...xNegative,
+        ready: false,
+        readinessReason: "actuator-unavailable"
+      };
+    }
+    const partial = step(coordinator, 4, true, partialNet, -2, revision);
+    expect(partial.state).toBe("SYNC");
+    expect(partial.readiness.winches["winch-x-negative"]).toBe(false);
   });
 
   it("aborts a live window when vehicle telemetry becomes stale", () => {

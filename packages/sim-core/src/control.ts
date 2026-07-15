@@ -4,6 +4,7 @@ import type {
   ControlCommand,
   ControllerConfig,
   NetConfig,
+  LinkConfig,
   Quat,
   RocketConfig,
   StateEstimate,
@@ -28,6 +29,11 @@ import {
   tiltFromVertical
 } from "./math";
 import type { CapturePlanePrediction } from "./estimation";
+import {
+  CooperativeMpcPlanner,
+  type CooperativeMpcSolution,
+  type MpcDiagnostics
+} from "./mpc";
 
 export interface RocketControllerInput {
   estimate: StateEstimate;
@@ -36,6 +42,7 @@ export interface RocketControllerInput {
   targetPositionM: Vec3;
   targetVelocityMps?: Vec3;
   verticalVelocityReferenceMps: number;
+  lateralAccelerationFeedforwardMps2?: [number, number];
   estimatedMassKg?: number;
   engineEnabled?: boolean;
 }
@@ -278,9 +285,11 @@ export class RocketController {
     const lateral = clampMagnitude3(
       [
         this.config.rocketPositionKp * (input.targetPositionM[0] - input.estimate.positionM[0]) +
-          this.config.rocketVelocityKd * (targetVelocity[0] - input.estimate.velocityMps[0]),
+          this.config.rocketVelocityKd * (targetVelocity[0] - input.estimate.velocityMps[0]) +
+          (input.lateralAccelerationFeedforwardMps2?.[0] ?? 0),
         this.config.rocketPositionKp * (input.targetPositionM[1] - input.estimate.positionM[1]) +
-          this.config.rocketVelocityKd * (targetVelocity[1] - input.estimate.velocityMps[1]),
+          this.config.rocketVelocityKd * (targetVelocity[1] - input.estimate.velocityMps[1]) +
+          (input.lateralAccelerationFeedforwardMps2?.[1] ?? 0),
         0
       ],
       this.limits.lateralAccelerationLimitMps2
@@ -352,6 +361,8 @@ export interface NetControlFeedback {
   broken: boolean;
   secured: boolean;
   tensionsN?: [number, number, number, number];
+  payoutM?: number;
+  payoutVelocityMps?: number;
 }
 
 export interface CaptureCoordinatorInput {
@@ -377,6 +388,7 @@ export interface CaptureCoordinatorOptions {
   secureDwellS?: number;
   missedGraceS?: number;
   lateralAccelerationLimitMps2?: number;
+  radio?: LinkConfig;
 }
 
 export type WinchCommandMap = {
@@ -401,6 +413,11 @@ export interface CaptureCoordinatorOutput {
     winches: Record<WinchNodeId, boolean>;
     all: boolean;
   };
+  mpcDiagnostics: MpcDiagnostics | null;
+  mpcRocketAccelerationReferenceMps2: [number, number];
+  mpcFallbackCount: number;
+  mpcSolveCount: number;
+  reachabilityMarginS: number;
   abortReason: string | null;
 }
 
@@ -432,7 +449,8 @@ export class WinchTensionController {
   public update(
     desiredTensionN: number,
     measuredTensionN: number,
-    dtS: number
+    dtS: number,
+    feedforwardDampingNspm = this.net.activeDampingMinNspm
   ): TensionControllerOutput {
     if (![desiredTensionN, measuredTensionN, dtS].every(Number.isFinite) || dtS <= 0) {
       throw new RangeError("tension controller inputs must be finite and dtS must be positive");
@@ -444,7 +462,11 @@ export class WinchTensionController {
       -this.tuning.integralLimitNs,
       this.tuning.integralLimitNs
     );
-    const unrestricted = this.net.activeDampingMinNspm +
+    const unrestricted = clamp(
+      feedforwardDampingNspm,
+      this.net.activeDampingMinNspm,
+      this.net.activeDampingMaxNspm
+    ) +
       this.tuning.kp * errorN + this.tuning.ki * this.integralErrorNs;
     const desiredDampingNspm = clamp(
       unrestricted,
@@ -649,6 +671,8 @@ export class CaptureCoordinator {
   private readonly tensionRampS: number;
   private readonly secureDwellS: number;
   private readonly missedGraceS: number;
+  private readonly minimumRevisionIntervalS: number;
+  private readonly revisionGuardS: number;
 
   private supervisorState: SupervisorState = "BOOT";
   private latestVehicle: CaptureVehicleObservation | null = null;
@@ -673,6 +697,11 @@ export class CaptureCoordinator {
     world: CapturePlanePrediction;
   } | null = null;
   private lastPredictionRolloutTick = -1;
+  private readonly mpcPlanner: CooperativeMpcPlanner | null;
+  private mpcSolution: CooperativeMpcSolution | null = null;
+  private lastMpcSolveTick = -1;
+  private mpcFallbackCount = 0;
+  private mpcSolveCount = 0;
   private abortReasonValue: string | null = null;
 
   public constructor(options: CaptureCoordinatorOptions) {
@@ -690,11 +719,19 @@ export class CaptureCoordinator {
     this.stableTrackSamples = Math.max(1, options.stableTrackSamples ?? 3);
     this.postContactTargetTensionN = Math.min(
       options.net.totalStrengthLimitN * 0.8,
-      options.postContactTargetTensionN ?? options.net.totalStrengthLimitN * 0.62
+      options.postContactTargetTensionN ?? options.rocket.massKg * options.gravityMps2
     );
     this.tensionRampS = options.tensionRampS ?? 0.12;
     this.secureDwellS = options.secureDwellS ?? 0.5;
     this.missedGraceS = options.missedGraceS ?? 0.4;
+    const assumedRoundTripS = options.radio === undefined
+      ? 0.2
+      : 2 * (options.radio.baseLatencyMs + options.radio.jitterMs) / 1_000;
+    this.minimumRevisionIntervalS = Math.max(0.25, assumedRoundTripS + 0.1);
+    this.revisionGuardS = Math.max(0.3, assumedRoundTripS + 0.15);
+    this.mpcPlanner = options.controller.algorithm === "mpc"
+      ? new CooperativeMpcPlanner(options.controller, options.rocket, options.net)
+      : null;
   }
 
   public reset(): void {
@@ -718,6 +755,11 @@ export class CaptureCoordinator {
     this.lastBiasObservationTick = -1;
     this.cachedPredictionPair = null;
     this.lastPredictionRolloutTick = -1;
+    this.mpcPlanner?.reset();
+    this.mpcSolution = null;
+    this.lastMpcSolveTick = -1;
+    this.mpcFallbackCount = 0;
+    this.mpcSolveCount = 0;
     this.abortReasonValue = null;
   }
 
@@ -890,6 +932,10 @@ export class CaptureCoordinator {
       predictedInterceptPositionM: [...worldPrediction.predictedInterceptPositionM],
       predictedInterceptVelocityMps: [...worldPrediction.predictedInterceptVelocityMps],
       predictedRelativeInterceptVelocityMps: [...relativePrediction.predictedInterceptVelocityMps],
+      rocketLateralAccelerationReferenceMps2:
+        this.mpcSolution?.diagnostics.converged === true
+          ? [...this.mpcSolution.rocketAccelerationReferenceMps2]
+          : [0, 0],
       predictionUncertaintyM: [
         Math.sqrt(relativePrediction.horizontalVarianceM2[0]) * this.controller.prediction.confidenceSigma,
         Math.sqrt(relativePrediction.horizontalVarianceM2[1]) * this.controller.prediction.confidenceSigma,
@@ -981,6 +1027,51 @@ export class CaptureCoordinator {
     };
   }
 
+  private updateMpc(input: CaptureCoordinatorInput): void {
+    if (
+      this.mpcPlanner === null ||
+      this.latestVehicle === null ||
+      this.latestRelativePrediction === null
+    ) return;
+    const solveIntervalTicks = Math.max(
+      1,
+      Math.round(1 / (this.controller.mpc.planRateHz * this.tickDurationS))
+    );
+    if (input.tick - this.lastMpcSolveTick < solveIntervalTicks) return;
+    const vehicle = propagateEstimate(this.latestVehicle.estimate, input.tick, this.tickDurationS);
+    const platform = propagateEstimate(input.platformEstimate, input.tick, this.tickDurationS);
+    const solution = this.mpcPlanner.solve({
+      rocketPositionM: [
+        vehicle.positionM[0] - this.navigationBiasEstimateM[0] - platform.positionM[0],
+        vehicle.positionM[1] - this.navigationBiasEstimateM[1] - platform.positionM[1]
+      ],
+      rocketVelocityMps: [
+        vehicle.velocityMps[0] - platform.velocityMps[0],
+        vehicle.velocityMps[1] - platform.velocityMps[1]
+      ],
+      netCenterM: [...input.net.centerM],
+      netCenterVelocityMps: [...input.net.centerVelocityMps],
+      halfSpacingM: [...input.net.halfSpacingM],
+      halfSpacingRateMps: [...input.net.halfSpacingRateMps],
+      predictedInterceptCenterM: [
+        this.latestRelativePrediction.predictedInterceptPositionM[0],
+        this.latestRelativePrediction.predictedInterceptPositionM[1]
+      ],
+      predictedRelativeInterceptVelocityMps: [
+        ...this.latestRelativePrediction.predictedInterceptVelocityMps
+      ],
+      timeToInterceptS: this.latestRelativePrediction.timeToInterceptS,
+      communicationAgeS: Math.max(
+        0,
+        (input.tick - this.latestVehicle.estimate.tick) * this.tickDurationS
+      )
+    });
+    this.lastMpcSolveTick = input.tick;
+    this.mpcSolveCount += 1;
+    this.mpcSolution = solution;
+    if (!solution.diagnostics.converged) this.mpcFallbackCount += 1;
+  }
+
   private servoNetCenter(
     net: NetControlFeedback,
     targetCenter: [number, number],
@@ -1014,7 +1105,12 @@ export class CaptureCoordinator {
     ];
   }
 
-  private desiredGeometry(net: NetControlFeedback, tick: number): {
+  private desiredGeometry(
+    net: NetControlFeedback,
+    tick: number,
+    vehicleEstimate: StateEstimate,
+    platformEstimate: StateEstimate
+  ): {
     center: [number, number];
     spacing: [number, number];
   } {
@@ -1035,6 +1131,30 @@ export class CaptureCoordinator {
       }
       return { center: [...net.centerM], spacing: [...net.halfSpacingM] };
     }
+    if (["CONTACT", "ARREST", "SECURED"].includes(this.supervisorState)) {
+      const tensionsN = net.tensionsN ?? [0, 0, 0, 0];
+      const pairBias = (negativeN: number, positiveN: number): number => {
+        const pairTotalN = Math.max(1, negativeN + positiveN);
+        return clamp((negativeN - positiveN) / pairTotalN, -1, 1);
+      };
+      const loadBalanceGain = 0.35;
+      const targetCenter: [number, number] = [
+        clampNetCenter(
+          net.centerM[0] +
+            loadBalanceGain * pairBias(tensionsN[0], tensionsN[1]) * net.halfSpacingM[0],
+          this.netConfig.centerTravelLimitM
+        ),
+        clampNetCenter(
+          net.centerM[1] +
+            loadBalanceGain * pairBias(tensionsN[2], tensionsN[3]) * net.halfSpacingM[1],
+          this.netConfig.centerTravelLimitM
+        )
+      ];
+      return {
+        center: this.servoNetCenter(net, targetCenter, [0, 0]),
+        spacing: [this.netConfig.closedHalfSpacingM, this.netConfig.closedHalfSpacingM]
+      };
+    }
     const elapsedS = (tick - this.trajectory.startTick) * this.tickDurationS;
     const xCenterSample = sampleMinimumJerk(
           this.trajectory.startCenterM[0],
@@ -1050,6 +1170,12 @@ export class CaptureCoordinator {
         );
     const plannedCenter: [number, number] = [xCenterSample.position, yCenterSample.position];
     const plannedCenterVelocity: [number, number] = [xCenterSample.velocity, yCenterSample.velocity];
+    if (this.mpcSolution?.diagnostics.converged === true) {
+      for (const axis of [0, 1] as const) {
+        plannedCenterVelocity[axis] +=
+          this.mpcSolution.netAccelerationReferenceMps2[axis] * this.controller.mpc.stepS;
+      }
+    }
     if (
       this.latestRelativePrediction !== null &&
       (this.supervisorState === "ARMED" || this.supervisorState === "CLOSING")
@@ -1114,18 +1240,42 @@ export class CaptureCoordinator {
     };
   }
 
-  private targetTension(tick: number): number {
+  private targetTension(tick: number, net: NetControlFeedback): number {
     if (this.contactTick === null || !["CONTACT", "ARREST", "SECURED"].includes(this.supervisorState)) {
       return 0;
     }
     const elapsedS = (tick - this.contactTick + 1) * this.tickDurationS;
-    return this.postContactTargetTensionN * minimumJerk(elapsedS / this.tensionRampS);
+    const staticTargetN = this.postContactTargetTensionN;
+    const payoutM = Math.max(0, net.payoutM ?? 0);
+    const payoutVelocityMps = Math.max(0, net.payoutVelocityMps ?? 0);
+    const equilibriumPayoutM = staticTargetN / Math.max(this.netConfig.totalStiffnessNpm, 1e-9);
+    const remainingBrakingDistanceM = equilibriumPayoutM - payoutM;
+    const strengthReserveN = this.netConfig.totalStrengthLimitN * 0.92;
+    const energyShapingTargetN = payoutVelocityMps > 0.15
+      ? remainingBrakingDistanceM > 0.15
+        ? staticTargetN +
+          this.rocketConfig.massKg * payoutVelocityMps ** 2 /
+            (2 * remainingBrakingDistanceM)
+        : strengthReserveN
+      : staticTargetN;
+    const strengthLimitedTargetN = Math.min(
+      energyShapingTargetN,
+      strengthReserveN
+    );
+    const measuredTotalN = (net.tensionsN ?? [0, 0, 0, 0]).reduce(
+      (sum, tensionN) => sum + Math.max(0, tensionN),
+      0
+    );
+    const initialTargetN = measuredTotalN > 0 ? measuredTotalN : strengthLimitedTargetN;
+    return initialTargetN +
+      (strengthLimitedTargetN - initialTargetN) * minimumJerk(elapsedS / this.tensionRampS);
   }
 
   private winchCommands(
     center: [number, number],
     spacing: [number, number],
-    targetTotalTensionN: number
+    targetTotalTensionN: number,
+    measuredTensionsN: [number, number, number, number]
   ): WinchCommandMap {
     const afterContact = ["CONTACT", "ARREST", "SECURED"].includes(this.supervisorState);
     const terminal = terminalState(this.supervisorState) && this.supervisorState !== "SECURED";
@@ -1134,7 +1284,21 @@ export class CaptureCoordinator {
       : afterContact
         ? "tension"
         : "position";
-    const perWinchTension = afterContact ? targetTotalTensionN / 4 : 0;
+    const measuredTotalTensionN = measuredTensionsN.reduce(
+      (sum, tensionN) => sum + Math.max(0, tensionN),
+      0
+    );
+    const minimumShare = 0.05;
+    const rawShares = measuredTotalTensionN > 1
+      ? measuredTensionsN.map((tensionN) => Math.max(
+          minimumShare,
+          Math.max(0, tensionN) / measuredTotalTensionN
+        ))
+      : [0.25, 0.25, 0.25, 0.25];
+    const shareTotal = rawShares.reduce((sum, share) => sum + share, 0);
+    const desiredTensionsN = rawShares.map(
+      (share) => afterContact ? targetTotalTensionN * share / shareTotal : 0
+    );
     const captureCenter = this.latestPlan?.centerM ?? center;
     const captureSpacing = this.latestPlan?.halfSpacingM ?? spacing;
     const captureTargets: [number, number, number, number] = [
@@ -1145,7 +1309,8 @@ export class CaptureCoordinator {
     ];
     const command = (
       desiredPositionM: number,
-      captureTargetPositionM: number
+      captureTargetPositionM: number,
+      desiredTensionN: number
     ): WinchCommandPayload => ({
       windowId: this.windowId,
       planRevision: this.latestPlan?.planRevision ?? 0,
@@ -1153,14 +1318,14 @@ export class CaptureCoordinator {
       captureTargetTick: this.latestPlan?.predictedInterceptTick ?? 0,
       captureTargetPositionM,
       desiredPositionM,
-      desiredTensionN: perWinchTension,
+      desiredTensionN,
       controlMode
     });
     return {
-      "winch-x-negative": command(center[0] - spacing[0], captureTargets[0]),
-      "winch-x-positive": command(center[0] + spacing[0], captureTargets[1]),
-      "winch-y-negative": command(center[1] - spacing[1], captureTargets[2]),
-      "winch-y-positive": command(center[1] + spacing[1], captureTargets[3])
+      "winch-x-negative": command(center[0] - spacing[0], captureTargets[0], desiredTensionsN[0] ?? 0),
+      "winch-x-positive": command(center[0] + spacing[0], captureTargets[1], desiredTensionsN[1] ?? 0),
+      "winch-y-negative": command(center[1] - spacing[1], captureTargets[2], desiredTensionsN[2] ?? 0),
+      "winch-y-positive": command(center[1] + spacing[1], captureTargets[3], desiredTensionsN[3] ?? 0)
     };
   }
 
@@ -1232,9 +1397,10 @@ export class CaptureCoordinator {
             interceptShiftS > 0.1 || uncertaintyShiftM > 0.25;
           const minimumRevisionIntervalTicks = Math.max(
             1,
-            Math.ceil(0.25 / this.tickDurationS)
+            Math.ceil(this.minimumRevisionIntervalS / this.tickDurationS)
           );
-          const mayRevise = input.tick <= this.latestPlan.commitDeadlineTick &&
+          const revisionGuardTicks = Math.ceil(this.revisionGuardS / this.tickDurationS);
+          const mayRevise = input.tick + revisionGuardTicks < this.latestPlan.commitDeadlineTick &&
             input.tick - this.lastRevisionTick >= minimumRevisionIntervalTicks;
           if (materialChange && mayRevise) {
             this.planRevision += 1;
@@ -1255,6 +1421,7 @@ export class CaptureCoordinator {
         this.latestPlan = { ...this.committedPlan, supervisorState: this.supervisorState };
       }
     }
+    this.updateMpc(input);
 
     if (!terminalState(this.supervisorState)) {
       if (
@@ -1363,8 +1530,13 @@ export class CaptureCoordinator {
       this.latestPlan.supervisorState = this.supervisorState;
       this.latestPlan.windowId = this.windowId;
     }
-    const geometry = this.desiredGeometry(input.net, input.tick);
-    const targetTension = this.targetTension(input.tick);
+    const geometry = this.desiredGeometry(
+      input.net,
+      input.tick,
+      input.groundVehicleEstimate,
+      input.platformEstimate
+    );
+    const targetTension = this.targetTension(input.tick, input.net);
     return {
       state: this.supervisorState,
       captureMode: captureModeForState(this.supervisorState),
@@ -1388,9 +1560,35 @@ export class CaptureCoordinator {
           },
       desiredNetCenterM: geometry.center,
       desiredHalfSpacingM: geometry.spacing,
-      winchCommands: this.winchCommands(geometry.center, geometry.spacing, targetTension),
+      winchCommands: this.winchCommands(
+        geometry.center,
+        geometry.spacing,
+        targetTension,
+        input.net.tensionsN ?? [0, 0, 0, 0]
+      ),
       targetTotalTensionN: targetTension,
       readiness: this.readinessForLatestPlan(input.net),
+      mpcDiagnostics: this.mpcSolution === null
+        ? null
+        : {
+            ...this.mpcSolution.diagnostics,
+            activeConstraints: [...this.mpcSolution.diagnostics.activeConstraints]
+          },
+      mpcRocketAccelerationReferenceMps2:
+        this.mpcSolution?.diagnostics.converged === true
+          ? [...this.mpcSolution.rocketAccelerationReferenceMps2]
+          : [0, 0],
+      mpcFallbackCount: this.mpcFallbackCount,
+      mpcSolveCount: this.mpcSolveCount,
+      reachabilityMarginS: this.latestPlan === null
+        ? 0
+        : (this.latestPlan.predictedInterceptTick - input.tick) * this.tickDurationS -
+          this.minimumTrajectoryDuration(
+            input.net.centerM,
+            input.net.halfSpacingM,
+            this.latestPlan.centerM,
+            this.latestPlan.halfSpacingM
+          ),
       abortReason: this.abortReasonValue
     };
   }

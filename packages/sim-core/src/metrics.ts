@@ -14,7 +14,13 @@ const createInitialMetrics = (): RecoveryMetrics => ({
   peakContactForceN: 0,
   peakApparentLoadG: 0,
   peakRopeTensionN: 0,
-  maxEstimateErrorM: 0
+  maxEstimateErrorM: 0,
+  predictionTimeErrorS: 0,
+  capturePlaneCenterErrorM: 0,
+  readyRoundTripS: 0,
+  tensionRmsErrorN: 0,
+  constraintActivationCount: 0,
+  mpcFallbackCount: 0
 });
 
 /** Accumulates run-level recovery outcomes and model-derived peak values. */

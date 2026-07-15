@@ -5,7 +5,8 @@ import { runSimulation, type SimulationOptions } from "./simulation";
 export const ALGORITHM_VARIANTS = [
   "fixed",
   "alpha-beta",
-  "predictive"
+  "predictive",
+  "mpc"
 ] as const satisfies readonly AlgorithmMode[];
 
 export type NumericRange = readonly [minimum: number, maximum: number];
@@ -65,7 +66,19 @@ export interface ExperimentTrialResult {
   /** Null means the run ended before a physical capture-plane evaluation. */
   missDistanceM: number | null;
   failureReason: string | null;
+  failureStage: FailureStage;
 }
+
+export type FailureStage =
+  | "none"
+  | "estimation"
+  | "unreachable"
+  | "handshake"
+  | "missed"
+  | "overspeed"
+  | "attitude"
+  | "rope-break"
+  | "captured-not-secured";
 
 export interface AlgorithmExperimentSummary {
   algorithm: AlgorithmMode;
@@ -79,6 +92,7 @@ export interface AlgorithmExperimentSummary {
   missEvaluatedRuns: number;
   meanMissDistanceM: number | null;
   failureReasons: Record<string, number>;
+  failureStages: Record<FailureStage, number>;
 }
 
 export interface AlgorithmComparisonProgress {
@@ -280,6 +294,31 @@ const reasonForUnsecuredRun = (
   return captured ? "captured-but-not-secured" : "capture-not-evaluated";
 };
 
+export const classifyFailureStage = (
+  secured: boolean,
+  captured: boolean,
+  reason: string | null
+): FailureStage => {
+  if (secured) return "none";
+  const normalized = reason?.toLowerCase() ?? "";
+  if (normalized.includes("strength") || normalized.includes("rope") || normalized.includes("broken")) {
+    return "rope-break";
+  }
+  if (captured) return "captured-not-secured";
+  if (normalized.includes("speed")) return "overspeed";
+  if (normalized.includes("tilt") || normalized.includes("attitude")) return "attitude";
+  if (normalized.includes("telemetry") || normalized.includes("estimate") || normalized.includes("navigation")) {
+    return "estimation";
+  }
+  if (normalized.includes("prepare") || normalized.includes("ready") || normalized.includes("window")) {
+    return "handshake";
+  }
+  if (normalized.includes("unreachable") || normalized.includes("not-closed") || normalized.includes("not-closing")) {
+    return "unreachable";
+  }
+  return "missed";
+};
+
 const mean = (values: readonly number[]): number =>
   values.length === 0
     ? 0
@@ -302,7 +341,12 @@ const summarize = (
     trial.missDistanceM === null ? [] : [trial.missDistanceM]
   );
   const failureReasons: Record<string, number> = {};
+  const failureStages = Object.fromEntries([
+    "none", "estimation", "unreachable", "handshake", "missed", "overspeed",
+    "attitude", "rope-break", "captured-not-secured"
+  ].map((stage) => [stage, 0])) as Record<FailureStage, number>;
   for (const trial of trials) {
+    failureStages[trial.failureStage] += 1;
     if (trial.failureReason === null) continue;
     failureReasons[trial.failureReason] = (failureReasons[trial.failureReason] ?? 0) + 1;
   }
@@ -317,7 +361,8 @@ const summarize = (
     p95PeakLoadN: percentile95(peakLoads),
     missEvaluatedRuns: misses.length,
     meanMissDistanceM: misses.length === 0 ? null : mean(misses),
-    failureReasons
+    failureReasons,
+    failureStages
   };
 };
 
@@ -345,6 +390,11 @@ export const runAlgorithmComparison = (
       const run = runSimulation(config, simulationOptions);
       const metrics = run.metrics;
       const evaluated = hasCapturePlaneEvaluation(metrics);
+      const failureReason = reasonForUnsecuredRun(
+        metrics.secured,
+        metrics.captured,
+        metrics.failureReason
+      );
       trials.push({
         algorithm,
         sampleIndex: perturbation.sampleIndex,
@@ -354,11 +404,8 @@ export const runAlgorithmComparison = (
         failed: metrics.failed || !metrics.secured,
         peakLoadN: metrics.peakContactForceN,
         missDistanceM: evaluated ? metrics.missDistanceM : null,
-        failureReason: reasonForUnsecuredRun(
-          metrics.secured,
-          metrics.captured,
-          metrics.failureReason
-        )
+        failureReason,
+        failureStage: classifyFailureStage(metrics.secured, metrics.captured, failureReason)
       });
       options.onProgress?.({
         completed: trials.length,

@@ -70,6 +70,7 @@ export type MessageType =
   | "VEHICLE_STATE"
   | "CAPTURE_PLAN"
   | "CAPTURE_READY"
+  | "GUIDANCE_UPDATE"
   | "COMMIT"
   | "ABORT"
   | "WINCH_COMMAND"
@@ -321,6 +322,7 @@ export interface CapturePlanPayload {
   predictedInterceptPositionM: Vec3;
   predictedInterceptVelocityMps: Vec3;
   predictedRelativeInterceptVelocityMps: Vec3;
+  rocketLateralAccelerationReferenceMps2: [number, number];
   predictionUncertaintyM: Vec3;
   confidenceRadiusM: number;
   supervisorState: SupervisorState;
@@ -345,6 +347,14 @@ export interface CaptureReadyPayload {
   speedMarginMps: number;
   attitudeMarginRad: number;
   controlAuthorityMarginMps2: number;
+}
+
+export interface GuidanceUpdatePayload {
+  windowId: number;
+  planRevision: number;
+  producedTick: number;
+  validUntilTick: number;
+  lateralAccelerationReferenceMps2: [number, number];
 }
 
 export interface WinchCommandPayload {
@@ -403,6 +413,12 @@ export interface RecoveryMetrics {
   peakApparentLoadG: number;
   peakRopeTensionN: number;
   maxEstimateErrorM: number;
+  predictionTimeErrorS: number;
+  capturePlaneCenterErrorM: number;
+  readyRoundTripS: number;
+  tensionRmsErrorN: number;
+  constraintActivationCount: number;
+  mpcFallbackCount: number;
 }
 
 /** Physics-tick work and storage ledger for the contact phase. */
@@ -454,8 +470,47 @@ export interface TelemetrySample {
   contactForceN: number;
   apparentLoadG: number;
   ropeTensionsN: [number, number, number, number];
+  desiredRopeTensionsN: [number, number, number, number];
+  activeDampingNspm: [number, number, number, number];
+  desiredNetCenterM: [number, number];
+  predictionTimeToGoS: number;
+  commitMarginS: number;
+  tensionErrorsN: [number, number, number, number];
+  saturationCount: number;
+  mpcIterations: number;
+  mpcFallback: boolean;
   radioAgeMs: number;
   supervisorState: SupervisorState;
+}
+
+export interface SnapshotMpcDiagnostics {
+  iterations: number;
+  converged: boolean;
+  fallbackReason: string;
+  objective: number;
+  projectedPeakLoadN: number;
+  optimalityResidual: number;
+  constraintActivations: number;
+  activeConstraints: string[];
+}
+
+export interface ControlDiagnostics {
+  desiredNetCenterM: [number, number];
+  desiredHalfSpacingM: [number, number];
+  reachabilityMarginS: number;
+  commitMarginS: number;
+  readiness: {
+    vehicle: boolean;
+    winches: Record<WinchNodeId, boolean>;
+    all: boolean;
+  };
+  desiredTensionsN: [number, number, number, number];
+  actualTensionsN: [number, number, number, number];
+  tensionErrorsN: [number, number, number, number];
+  tensionIntegralErrorsNs: [number, number, number, number];
+  tensionSaturated: [boolean, boolean, boolean, boolean];
+  mpc: SnapshotMpcDiagnostics | null;
+  mpcFallbackCount: number;
 }
 
 export interface SimulationSnapshot {
@@ -469,6 +524,7 @@ export interface SimulationSnapshot {
   groundEstimate: StateEstimate;
   capturePlan: CapturePlanPayload | null;
   control: ControlCommand;
+  controlDiagnostics: ControlDiagnostics;
   supervisorState: SupervisorState;
   radioStats: NetworkStats;
   fieldbusStats: NetworkStats;

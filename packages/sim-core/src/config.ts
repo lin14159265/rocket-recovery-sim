@@ -90,8 +90,8 @@ export const createNominalScenario = (): ScenarioConfig => ({
     verticalVelocityKp: 0.85,
     attitudeKp: 6_000_000,
     attitudeKd: 10_000_000,
-    netCenterKp: 1.8,
-    netCenterKd: 1.2,
+    netCenterKp: 3.2,
+    netCenterKd: 1.6,
     maxCaptureSpeedMps: 15,
     maxCaptureTiltRad: 0.21,
     requiredApertureMarginM: 0.3,
@@ -117,7 +117,7 @@ export const createNominalScenario = (): ScenarioConfig => ({
       stepS: 0.2,
       horizonSteps: 40,
       maximumIterations: 40,
-      convergenceTolerance: 1e-3
+      convergenceTolerance: 0.02
     }
   },
   radio: {

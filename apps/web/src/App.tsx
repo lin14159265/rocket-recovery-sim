@@ -33,6 +33,7 @@ type WithoutRequestId<T> = T extends unknown ? Omit<T, "requestId"> : never;
 const algorithmLabel = (algorithm: AlgorithmMode): string => {
   if (algorithm === "fixed") return "固定网";
   if (algorithm === "alpha-beta") return "α–β 协同";
+  if (algorithm === "mpc") return "约束 MPC";
   return "预测协同";
 };
 

@@ -27,6 +27,7 @@ const metres = (value: number | null): string => value === null ? "无穿越" : 
 const algorithmName = (algorithm: AlgorithmExperimentSummary["algorithm"]): string => {
   if (algorithm === "fixed") return "固定网";
   if (algorithm === "alpha-beta") return "α–β 协同";
+  if (algorithm === "mpc") return "约束 MPC";
   return "预测协同";
 };
 
