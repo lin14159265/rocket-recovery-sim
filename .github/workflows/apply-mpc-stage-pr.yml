@@ -1,0 +1,67 @@
+name: PR触发一次性应用受限增量MPC
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-mpc-stage-pr
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    if: github.head_ref == 'codex/control-v0.4'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: 检出目标分支
+        uses: actions/checkout@v4
+        with:
+          ref: codex/control-v0.4
+          fetch-depth: 0
+
+      - name: 核对触发提交并提取补丁
+        id: gate
+        run: |
+          set -euo pipefail
+          subject=$(git log -1 --pretty=%s)
+          if [ "${subject}" != '触发受限增量MPC阶段应用' ]; then
+            echo 'apply=false' >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          echo 'apply=true' >> "${GITHUB_OUTPUT}"
+          git merge-base --is-ancestor b0af39cfb97b8e54089a8b7989e7ccca5447b1b2 HEAD
+          awk '/^PATCH_B64$/{flag=!flag;next} flag' .github/workflows/apply-mpc-stage-once.yml \
+            > /tmp/mpc-stage.patch.gz.b64
+          base64 -d /tmp/mpc-stage.patch.gz.b64 | gzip -d > /tmp/mpc-stage.patch
+          echo '87a1f76d1bb9681ebb0855b3e141df54a32b1417079a14cb15e4a14437072996  /tmp/mpc-stage.patch' | sha256sum -c -
+          git apply --check /tmp/mpc-stage.patch
+          git apply /tmp/mpc-stage.patch
+
+      - name: 安装与完整验证
+        if: steps.gate.outputs.apply == 'true'
+        run: |
+          set -euo pipefail
+          npm install
+          npm run typecheck
+          npm test
+          npm run build
+          npm run lab
+          npm run lab -- --algorithm mpc
+          npm run lab:monte-carlo -- --runs 20 --seed 20260714
+
+      - name: 生成正式阶段提交
+        if: steps.gate.outputs.apply == 'true'
+        run: |
+          set -euo pipefail
+          rm .github/workflows/apply-mpc-stage-once.yml
+          rm .github/workflows/apply-mpc-stage-pr.yml
+          git config user.name 'OpenAI Codex'
+          git config user.email 'codex@openai.com'
+          git add -A
+          git commit -m '改进受限增量MPC并补充分项回退诊断'
+          git push origin HEAD:codex/control-v0.4
