@@ -1,4 +1,5 @@
 import type {
+  CaptureReadyPayload,
   CapturePlanPayload,
   ControlCommand,
   DomainEvent,
@@ -23,6 +24,7 @@ import { fingerprintScenarioConfig } from "./config";
 import {
   CaptureCoordinator,
   RocketController,
+  WinchTensionController,
   computeVerticalVelocityReference,
   type CaptureCoordinatorOutput,
   type NetControlFeedback
@@ -178,6 +180,10 @@ const axisPositionsFromCommands = (
 const makeInitialWinchCommands = (config: ScenarioConfig): Record<WinchNodeId, WinchWireCommand> => ({
   "winch-x-negative": {
     windowId: 0,
+    planRevision: 0,
+    commitDeadlineTick: 0,
+    captureTargetTick: 0,
+    captureTargetPositionM: -config.net.closedHalfSpacingM,
     desiredPositionM: -config.net.openHalfSpacingM,
     desiredTensionN: 0,
     controlMode: "position",
@@ -185,6 +191,10 @@ const makeInitialWinchCommands = (config: ScenarioConfig): Record<WinchNodeId, W
   },
   "winch-x-positive": {
     windowId: 0,
+    planRevision: 0,
+    commitDeadlineTick: 0,
+    captureTargetTick: 0,
+    captureTargetPositionM: config.net.closedHalfSpacingM,
     desiredPositionM: config.net.openHalfSpacingM,
     desiredTensionN: 0,
     controlMode: "position",
@@ -192,6 +202,10 @@ const makeInitialWinchCommands = (config: ScenarioConfig): Record<WinchNodeId, W
   },
   "winch-y-negative": {
     windowId: 0,
+    planRevision: 0,
+    commitDeadlineTick: 0,
+    captureTargetTick: 0,
+    captureTargetPositionM: -config.net.closedHalfSpacingM,
     desiredPositionM: -config.net.openHalfSpacingM,
     desiredTensionN: 0,
     controlMode: "position",
@@ -199,6 +213,10 @@ const makeInitialWinchCommands = (config: ScenarioConfig): Record<WinchNodeId, W
   },
   "winch-y-positive": {
     windowId: 0,
+    planRevision: 0,
+    commitDeadlineTick: 0,
+    captureTargetTick: 0,
+    captureTargetPositionM: config.net.closedHalfSpacingM,
     desiredPositionM: config.net.openHalfSpacingM,
     desiredTensionN: 0,
     controlMode: "position",
@@ -339,6 +357,7 @@ const receivedWinchFeedback = (
   );
   const position = (node: WinchNodeId, fallback: number): number =>
     statuses[node]?.payload.positionM ?? fallback;
+  const velocity = (node: WinchNodeId): number => statuses[node]?.payload.velocityMps ?? 0;
   const negativeX = position("winch-x-negative", -config.net.openHalfSpacingM);
   const positiveX = position("winch-x-positive", config.net.openHalfSpacingM);
   const negativeY = position("winch-y-negative", -config.net.openHalfSpacingM);
@@ -346,11 +365,25 @@ const receivedWinchFeedback = (
   const tensionFresh = tension !== null && tick - tension.receivedTick <= timeoutTicks;
   return {
     centerM: [(negativeX + positiveX) / 2, (negativeY + positiveY) / 2],
+    centerVelocityMps: [
+      (velocity("winch-x-negative") + velocity("winch-x-positive")) / 2,
+      (velocity("winch-y-negative") + velocity("winch-y-positive")) / 2
+    ],
     halfSpacingM: [
       Math.max(0, (positiveX - negativeX) / 2),
       Math.max(0, (positiveY - negativeY) / 2)
     ],
+    halfSpacingRateMps: [
+      (velocity("winch-x-positive") - velocity("winch-x-negative")) / 2,
+      (velocity("winch-y-positive") - velocity("winch-y-negative")) / 2
+    ],
     winchesReady: fresh,
+    winchStatuses: {
+      "winch-x-negative": statuses["winch-x-negative"]?.payload ?? null,
+      "winch-x-positive": statuses["winch-x-positive"]?.payload ?? null,
+      "winch-y-negative": statuses["winch-y-negative"]?.payload ?? null,
+      "winch-y-positive": statuses["winch-y-positive"]?.payload ?? null
+    },
     anyWinchStuck: current.some((received) => received?.payload.stuck === true),
     contactDetected: tensionFresh ? tension.payload.contactDetected : false,
     broken: tensionFresh ? tension.payload.broken : false,
@@ -543,6 +576,8 @@ export const runSimulation = (
     tickDurationS: dtS,
     controller: config.controller,
     net: config.net,
+    rocket: config.rocket,
+    gravityMps2: config.environment.gravityMps2,
     capturePlaneZ: config.platform.capturePlaneZ,
     lateralAccelerationLimitMps2: config.rocket.lateralAccelerationLimitMps2,
     // Hold the physical window through modest arrival-time model error. The
@@ -582,13 +617,29 @@ export const runSimulation = (
   let latestVehicleDeliveryTick = -1;
   let planAtRocket: CapturePlanPayload | null = null;
   let abortReceivedAtRocket = false;
-  let readyAnnouncedWindow = -1;
+  let readyAnnouncedPlanKey = "";
+  let coordinatorReadyPlanKey = "";
   let coordinatorOutput: CaptureCoordinatorOutput | null = null;
   let previousSupervisorState: SupervisorState = "BOOT";
   let previousHandshake = "IDLE";
   let receivedTension: Received<TensionWireStatus> | null = null;
   const receivedStatuses: Partial<Record<WinchNodeId, Received<WinchWireStatus>>> = {};
   const deliveredWinchCommands = makeInitialWinchCommands(config);
+  const tensionControllers = Object.fromEntries(
+    WINCH_IDS.map((node) => [
+      node,
+      new WinchTensionController(config.controller.tension, config.net)
+    ])
+  ) as Record<WinchNodeId, WinchTensionController>;
+  const standbyActiveDampingNspm = Math.min(
+    config.net.activeDampingMaxNspm,
+    Math.max(config.net.activeDampingMinNspm, config.net.totalDampingNspm / 4.4)
+  );
+  let tensionControllerOutputs = WINCH_IDS.map(() => ({
+    desiredDampingNspm: standbyActiveDampingNspm,
+    integralErrorNs: 0,
+    saturated: false
+  }));
   let heldPlantInput: PlantStepInput = createNeutralPlantInput(config);
   let nextFrameTimeS = 0;
   let finalSnapshot: SimulationSnapshot | null = null;
@@ -667,7 +718,10 @@ export const runSimulation = (
           latestVehicleAtCoordinator = structuredClone(packet.payload as VehicleStatePayload);
           latestVehicleDeliveryTick = tick;
         } else if (packet.header.type === "CAPTURE_READY" && latestVehicleAtCoordinator !== null) {
-          latestVehicleAtCoordinator.captureReady = true;
+          const readiness = packet.payload as CaptureReadyPayload;
+          latestVehicleAtCoordinator.captureReady = readiness.ready;
+          latestVehicleAtCoordinator.acknowledgedWindowId = readiness.windowId;
+          latestVehicleAtCoordinator.acknowledgedPlanRevision = readiness.planRevision;
           latestVehicleDeliveryTick = tick;
         }
       } else if (packet.header.destination === "rocket") {
@@ -704,6 +758,8 @@ export const runSimulation = (
     }
 
     const agreedPlanAtRocket = planAtRocket !== null &&
+      tick >= planAtRocket.validFromTick &&
+      tick <= planAtRocket.validUntilTick &&
       ["SYNC", "ARMED", "CLOSING", "CONTACT", "ARREST", "SECURED"].includes(
         planAtRocket.supervisorState
       )
@@ -716,7 +772,7 @@ export const runSimulation = (
       config.platform.capturePlaneZ;
     const captureReady = agreedPlanAtRocket !== null &&
       !abortReceivedAtRocket &&
-      norm3(agreedPlanAtRocket.predictedInterceptVelocityMps) <=
+      norm3(agreedPlanAtRocket.predictedRelativeInterceptVelocityMps) <=
         config.controller.maxCaptureSpeedMps &&
       agreedPlanAtRocket.confidenceRadiusM + config.controller.requiredApertureMarginM <
         config.net.openHalfSpacingM - config.rocket.radiusM;
@@ -736,6 +792,8 @@ export const runSimulation = (
         angularVelocityRadps: [...attitudeFrame.angularVelocityRadps],
         rocketMode,
         captureReady,
+        acknowledgedWindowId: captureReady ? agreedPlanAtRocket?.windowId ?? null : null,
+        acknowledgedPlanRevision: captureReady ? agreedPlanAtRocket?.planRevision ?? null : null,
         healthFlags: 0
       };
       send(
@@ -752,9 +810,26 @@ export const runSimulation = (
     if (
       captureReady &&
       agreedPlanAtRocket !== null &&
-      readyAnnouncedWindow !== agreedPlanAtRocket.windowId &&
+      readyAnnouncedPlanKey !== `${agreedPlanAtRocket.windowId}:${agreedPlanAtRocket.planRevision}` &&
       !radioSuppressed
     ) {
+      const positionMarginM = config.net.openHalfSpacingM - config.rocket.radiusM -
+        config.controller.requiredApertureMarginM - agreedPlanAtRocket.confidenceRadiusM;
+      const speedMarginMps = config.controller.maxCaptureSpeedMps -
+        norm3(agreedPlanAtRocket.predictedRelativeInterceptVelocityMps);
+      const attitudeMarginRad = config.controller.maxCaptureTiltRad -
+        Math.hypot(attitudeFrame.attitudeWxyz[1], attitudeFrame.attitudeWxyz[2]) * 2;
+      const readyPayload: CaptureReadyPayload = {
+        windowId: agreedPlanAtRocket.windowId,
+        planRevision: agreedPlanAtRocket.planRevision,
+        ready: true,
+        reason: "ready",
+        evaluatedTick: tick,
+        positionMarginM,
+        speedMarginMps,
+        attitudeMarginRad,
+        controlAuthorityMarginMps2: config.rocket.lateralAccelerationLimitMps2
+      };
       send(
         radio,
         radioSequence,
@@ -763,20 +838,48 @@ export const runSimulation = (
         "CAPTURE_READY",
         tick,
         radioTtlTicks,
-        { windowId: agreedPlanAtRocket.windowId }
+        readyPayload
       );
-      readyAnnouncedWindow = agreedPlanAtRocket.windowId;
+      readyAnnouncedPlanKey = `${agreedPlanAtRocket.windowId}:${agreedPlanAtRocket.planRevision}`;
+      event(
+        tick,
+        "CAPTURE_READY",
+        "info",
+        `火箭确认窗口 ${readyAnnouncedPlanKey}，速度裕度 ${speedMarginMps.toFixed(2)} m/s`
+      );
     }
 
     if (tick % netControlTicks === 0) {
       for (const node of WINCH_IDS) {
         const axis = axisStateFor(plantState, node);
+        const acknowledgedCommand = deliveredWinchCommands[node];
+        const remainingTravelM = Math.abs(
+          acknowledgedCommand.captureTargetPositionM - axis.positionM
+        );
+        const arrivalDurationS = Math.max(
+          remainingTravelM / Math.max(1e-9, config.net.winchMaxSpeedMps),
+          Math.sqrt(2 * remainingTravelM / Math.max(1e-9, config.net.winchMaxAccelerationMps2))
+        );
+        const estimatedArrivalTick = tick + Math.ceil(arrivalDurationS / dtS);
+        const planKnown = acknowledgedCommand.windowId > 0;
+        const deadlineReachable = planKnown && tick <= acknowledgedCommand.commitDeadlineTick &&
+          estimatedArrivalTick <= acknowledgedCommand.captureTargetTick;
+        const winchReady = planKnown && !axis.stuck && deadlineReachable;
         const status: WinchWireStatus = {
           sampledTick: tick,
           positionM: axis.positionM,
           velocityMps: axis.velocityMps,
           tensionN: plantState.net.tensionsN[winchAxisIndex[node]],
-          stuck: axis.stuck
+          stuck: axis.stuck,
+          readyWindowId: planKnown ? acknowledgedCommand.windowId : null,
+          readyPlanRevision: planKnown ? acknowledgedCommand.planRevision : null,
+          ready: winchReady,
+          estimatedArrivalTick: planKnown ? estimatedArrivalTick : null,
+          readinessReason: axis.stuck
+            ? "actuator-unavailable"
+            : deadlineReachable
+              ? "ready"
+              : "deadline-unreachable"
         };
         send(
           fieldbus,
@@ -810,9 +913,17 @@ export const runSimulation = (
       coordinatorOutput = coordinator.step({
         tick,
         vehicleState: latestVehicleAtCoordinator,
+        groundVehicleEstimate: groundEstimate,
         platformEstimate,
         net: receivedWinchFeedback(tick, config, receivedStatuses, receivedTension)
       });
+      const currentPlanKey = coordinatorOutput.plan === null
+        ? ""
+        : `${coordinatorOutput.plan.windowId}:${coordinatorOutput.plan.planRevision}`;
+      if (coordinatorOutput.readiness.all && currentPlanKey !== coordinatorReadyPlanKey) {
+        coordinatorReadyPlanKey = currentPlanKey;
+        event(tick, "CAPTURE_READY", "info", `协调器收齐窗口 ${currentPlanKey} 的五方就绪确认`);
+      }
       if (coordinatorOutput.state !== previousSupervisorState) {
         const severity: DomainEvent["severity"] = coordinatorOutput.state === "SECURED"
           ? "success"
@@ -877,15 +988,18 @@ export const runSimulation = (
         rocketEstimate,
         capturePlaneWorldZ,
         {
-          captureDescentSpeedMps: options.guidance?.captureDescentSpeedMps ?? 6,
+          captureDescentSpeedMps: options.guidance?.captureDescentSpeedMps ??
+            config.controller.guidance.captureDescentSpeedMps,
           maximumDescentSpeedMps: options.guidance?.maximumDescentSpeedMps ??
-            Math.max(6, Math.abs(config.rocket.initialVelocityMps[2])),
+            config.controller.guidance.maximumDescentSpeedMps,
           // Chosen so the calibrated 891 m / -58 m/s case reaches roughly
           // 6 m/s at the capture plane; it is a study setting, not flight data.
-          brakingAccelerationMps2: options.guidance?.brakingAccelerationMps2 ?? 1.95
+          brakingAccelerationMps2: options.guidance?.brakingAccelerationMps2 ??
+            config.controller.guidance.brakingAccelerationMps2
         }
       );
-      const engineCutoffHeightM = options.guidance?.engineCutoffHeightM ?? 0.7;
+      const engineCutoffHeightM = options.guidance?.engineCutoffHeightM ??
+        config.controller.guidance.engineCutoffHeightM;
       const committed = coordinatorOutput?.handshakePhase === "COMMIT";
       const engineCutoff = committed && altitudeAbovePlaneM <= engineCutoffHeightM;
       const engineEnabled = !engineCutoff &&
@@ -920,6 +1034,27 @@ export const runSimulation = (
         abortReceivedAtRocket,
         coordinatorOutput?.state ?? "BOOT"
       );
+      tensionControllerOutputs = WINCH_IDS.map((node, index) => {
+        const wireCommand = deliveredWinchCommands[node];
+        const controller = tensionControllers[node];
+        if (
+          wireCommand.controlMode === "tension" &&
+          plantState.net.mode !== "broken" &&
+          plantState.net.mode !== "missed"
+        ) {
+          return controller.update(
+            wireCommand.desiredTensionN,
+            plantState.net.tensionsN[index] ?? 0,
+            1 / config.controller.controlRateHz
+          );
+        }
+        controller.reset();
+        return {
+          desiredDampingNspm: standbyActiveDampingNspm,
+          integralErrorNs: 0,
+          saturated: false
+        };
+      });
       heldPlantInput = {
         rocketControl: command,
         netCommand: {
@@ -928,6 +1063,15 @@ export const runSimulation = (
             (sum, node) => sum + deliveredWinchCommands[node].desiredTensionN,
             0
           ),
+          desiredTensionsN: WINCH_IDS.map(
+            (node) => deliveredWinchCommands[node].desiredTensionN
+          ) as WinchAxisValues<number>,
+          desiredActiveDampingNspm: tensionControllerOutputs.map(
+            (output) => output.desiredDampingNspm
+          ) as WinchAxisValues<number>,
+          tensionControllerSaturated: tensionControllerOutputs.map(
+            (output) => output.saturated
+          ) as WinchAxisValues<boolean>,
           requestedMode: deliveredWinchCommands["winch-x-negative"].requestedMode
         },
         requestedRocketMode

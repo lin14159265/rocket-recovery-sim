@@ -11,7 +11,7 @@ export const fingerprintScenarioConfig = (config: ScenarioConfig): string =>
   crc32(stableStringify(config)).toString(16).padStart(8, "0");
 
 export const createNominalScenario = (): ScenarioConfig => ({
-  schemaVersion: 2,
+  schemaVersion: 3,
   id: "nominal-cooperative",
   name: "标称协同捕获",
   description: "公开机理约束下的候选闭环；数值参数为截图标定或研究假设。",
@@ -60,7 +60,10 @@ export const createNominalScenario = (): ScenarioConfig => ({
     arrestDistanceM: 8,
     winchMaxSpeedMps: 6.2,
     winchMaxAccelerationMps2: 12,
-    winchTimeConstantS: 0.08
+    winchTimeConstantS: 0.08,
+    activeDampingMinNspm: 12_000,
+    activeDampingMaxNspm: 60_000,
+    activeDampingRateNspmPerS: 100_000
   },
   environment: {
     gravityMps2: 9.80665,
@@ -92,7 +95,30 @@ export const createNominalScenario = (): ScenarioConfig => ({
     maxCaptureSpeedMps: 15,
     maxCaptureTiltRad: 0.21,
     requiredApertureMarginM: 0.3,
-    staleTelemetryAbortS: 0.8
+    staleTelemetryAbortS: 0.8,
+    prediction: {
+      stepS: 0.05,
+      maximumHorizonS: 30,
+      confidenceSigma: 3
+    },
+    guidance: {
+      captureDescentSpeedMps: 6,
+      maximumDescentSpeedMps: 75,
+      brakingAccelerationMps2: 1.95,
+      engineCutoffHeightM: 0.7
+    },
+    tension: {
+      kp: 0.25,
+      ki: 1.25,
+      integralLimitNs: 250_000
+    },
+    mpc: {
+      planRateHz: 20,
+      stepS: 0.2,
+      horizonSteps: 40,
+      maximumIterations: 40,
+      convergenceTolerance: 1e-3
+    }
   },
   radio: {
     baseLatencyMs: 45,
@@ -142,6 +168,7 @@ export const createNominalScenario = (): ScenarioConfig => ({
     "net.totalDampingNspm": source("calibrated", "约 9 m/s 捕获速度对应约 0.95 MN 阻尼峰值", "四绳总等效值"),
     "net.totalStrengthLimitN": source("assumed", "真实网系极限载荷未公开", "仅作为代理断绳状态阈值，不是结构许用载荷"),
     "net.winchMaxSpeedMps": source("assumed", "真实绞盘运动能力未公开", "满足 21 m 到 3 m 的 5.5 s 最小加加速度轨迹"),
+    "net.activeDamping": source("assumed", "真实缓冲阻拦索和制动器参数未公开", "四节点主动阻尼代理范围，仅用于候选张力闭环"),
     "controller.attitudeGains": source("assumed", "真实姿态控制律与带宽未公开", "按代理刚体惯量调至阻尼充足且不超过力矩限幅"),
     "controller.requiredApertureMarginM": source("assumed", "真实挂索几何与允许偏差未公开", "等效刚体捕获判据的研究余量"),
     "radio.baseLatencyMs": source("assumed", "真实无线链路时延未公开", "45 ms 为闭环压力测试的代理基线"),
@@ -149,6 +176,10 @@ export const createNominalScenario = (): ScenarioConfig => ({
     "sensors.rocketPositionNoiseM": source("assumed", "真实箭上导航精度未公开", "0.35 m 为估计器对照所用噪声标准差"),
     "controller.netCenterKp": source("calibrated", "依据当前代理平台与绞盘响应整定", "仅保证本模型闭环阻尼与限幅行为"),
     "controller.staleTelemetryAbortS": source("assumed", "真实失联处置门限未公开", "0.8 s 为代理监督状态机中止阈值"),
+    "controller.prediction": source("assumed", "真实交会预测器未公开", "50 ms 制导感知滚动、30 s 上限和 3σ 包络为研究设置"),
+    "controller.guidance": source("calibrated", "公开资料未披露终端制导包络", "按当前代理初态整定的速度包络和关机高度"),
+    "controller.tension": source("calibrated", "依据当前四绳等效模型局部整定", "PI 参数仅保证代理执行器限幅和抗积分饱和行为"),
+    "controller.mpc": source("assumed", "真实协同优化器未公开", "确定性投影梯度 QP 的研究预算"),
     radio: source("assumed", "真实通信体制未公开", "用于压力测试的候选链路"),
     sensors: source("assumed", "真实传感器配置未公开", "用于候选估计算法比较"),
     faults: source("assumed", "故障时序与幅值未公开", "仅用于闭环鲁棒性压力试验")

@@ -13,7 +13,7 @@ export interface ParameterSource {
   note: string;
 }
 
-export type AlgorithmMode = "fixed" | "alpha-beta" | "predictive";
+export type AlgorithmMode = "fixed" | "alpha-beta" | "predictive" | "mpc";
 export type CaptureMode =
   | "open"
   | "tracking"
@@ -146,6 +146,10 @@ export interface NetConfig {
   winchMaxSpeedMps: number;
   winchMaxAccelerationMps2: number;
   winchTimeConstantS: number;
+  /** Per-rope active damping proxy used by the local tension loops. */
+  activeDampingMinNspm: number;
+  activeDampingMaxNspm: number;
+  activeDampingRateNspmPerS: number;
 }
 
 export interface EnvironmentConfig {
@@ -181,6 +185,29 @@ export interface ControllerConfig {
   maxCaptureTiltRad: number;
   requiredApertureMarginM: number;
   staleTelemetryAbortS: number;
+  prediction: {
+    stepS: number;
+    maximumHorizonS: number;
+    confidenceSigma: number;
+  };
+  guidance: {
+    captureDescentSpeedMps: number;
+    maximumDescentSpeedMps: number;
+    brakingAccelerationMps2: number;
+    engineCutoffHeightM: number;
+  };
+  tension: {
+    kp: number;
+    ki: number;
+    integralLimitNs: number;
+  };
+  mpc: {
+    planRateHz: number;
+    stepS: number;
+    horizonSteps: number;
+    maximumIterations: number;
+    convergenceTolerance: number;
+  };
 }
 
 
@@ -198,7 +225,7 @@ export interface ScenarioFaultConfig {
 }
 
 export interface ScenarioConfig {
-  schemaVersion: 2;
+  schemaVersion: 3;
   id: string;
   name: string;
   description: string;
@@ -255,6 +282,9 @@ export interface NetTruthState {
   payoutM: number;
   payoutVelocityMps: number;
   targetTotalTensionN: number;
+  desiredTensionsN: [number, number, number, number];
+  activeDampingNspm: [number, number, number, number];
+  tensionControllerSaturated: [boolean, boolean, boolean, boolean];
   mode: CaptureMode;
 }
 
@@ -273,23 +303,56 @@ export interface VehicleStatePayload {
   angularVelocityRadps: Vec3;
   rocketMode: RocketMode;
   captureReady: boolean;
+  acknowledgedWindowId: number | null;
+  acknowledgedPlanRevision: number | null;
   healthFlags: number;
 }
 
 export interface CapturePlanPayload {
   windowId: number;
+  planRevision: number;
+  validFromTick: number;
+  validUntilTick: number;
+  commitDeadlineTick: number;
   capturePlaneZ: number;
   centerM: [number, number];
   halfSpacingM: [number, number];
   predictedInterceptTick: number;
   predictedInterceptPositionM: Vec3;
   predictedInterceptVelocityMps: Vec3;
+  predictedRelativeInterceptVelocityMps: Vec3;
+  predictionUncertaintyM: Vec3;
   confidenceRadiusM: number;
   supervisorState: SupervisorState;
 }
 
+export type EndpointReadinessReason =
+  | "ready"
+  | "stale-plan"
+  | "prediction-infeasible"
+  | "speed-margin"
+  | "attitude-margin"
+  | "actuator-unavailable"
+  | "deadline-unreachable";
+
+export interface CaptureReadyPayload {
+  windowId: number;
+  planRevision: number;
+  ready: boolean;
+  reason: EndpointReadinessReason;
+  evaluatedTick: number;
+  positionMarginM: number;
+  speedMarginMps: number;
+  attitudeMarginRad: number;
+  controlAuthorityMarginMps2: number;
+}
+
 export interface WinchCommandPayload {
   windowId: number;
+  planRevision: number;
+  commitDeadlineTick: number;
+  captureTargetTick: number;
+  captureTargetPositionM: number;
   desiredPositionM: number;
   desiredTensionN: number;
   controlMode: "position" | "tension" | "hold";
@@ -300,6 +363,11 @@ export interface WinchStatusPayload {
   velocityMps: number;
   tensionN: number;
   stuck: boolean;
+  readyWindowId: number | null;
+  readyPlanRevision: number | null;
+  ready: boolean;
+  estimatedArrivalTick: number | null;
+  readinessReason: EndpointReadinessReason;
 }
 
 export interface ControlCommand {
