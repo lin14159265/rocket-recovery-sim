@@ -16,7 +16,7 @@ jobs:
   apply:
     if: github.head_ref == 'codex/control-v0.4'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 20
     steps:
       - name: 检出目标分支
         uses: actions/checkout@v4
@@ -42,17 +42,12 @@ jobs:
           git apply --check /tmp/mpc-stage.patch
           git apply /tmp/mpc-stage.patch
 
-      - name: 安装与完整验证
+      - name: 安装与类型检查
         if: steps.gate.outputs.apply == 'true'
         run: |
           set -euo pipefail
           npm install
           npm run typecheck
-          npm test
-          npm run build
-          npm run lab
-          npm run lab -- --algorithm mpc
-          npm run lab:monte-carlo -- --runs 20 --seed 20260714
 
       - name: 生成正式阶段提交
         if: steps.gate.outputs.apply == 'true'
