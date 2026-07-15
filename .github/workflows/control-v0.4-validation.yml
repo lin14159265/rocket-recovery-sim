@@ -14,7 +14,7 @@ permissions:
 
 concurrency:
   group: control-v0.4-validation-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   validate:
@@ -28,15 +28,19 @@ jobs:
           ref: codex/control-v0.4
           fetch-depth: 0
 
-      - name: 核对分支与提交
+      - name: 核对分支、提交并归档源码
+        id: source
         run: |
           mkdir -p validation-artifacts
+          HEAD_SHA=$(git rev-parse HEAD)
+          echo "sha=${HEAD_SHA}" >> "${GITHUB_OUTPUT}"
           {
             git status -sb
-            git rev-parse HEAD
+            echo "HEAD=${HEAD_SHA}"
             git merge-base --is-ancestor b0af39cfb97b8e54089a8b7989e7ccca5447b1b2 HEAD
             git log -5 --oneline
           } 2>&1 | tee validation-artifacts/git-state.log
+          git archive --format=tar.gz --output validation-artifacts/source-head.tar.gz HEAD
 
       - name: 配置 Node.js 22
         uses: actions/setup-node@v4
@@ -91,6 +95,7 @@ jobs:
           MONTE_CARLO: ${{ steps.monte_carlo.outcome }}
         run: |
           cat > validation-artifacts/summary.txt <<EOF
+          source_head=${{ steps.source.outputs.sha }}
           install=${INSTALL}
           typecheck=${TYPECHECK}
           test=${TEST}
@@ -101,11 +106,11 @@ jobs:
           EOF
           cat validation-artifacts/summary.txt
 
-      - name: 上传完整验证日志
+      - name: 上传源码与完整验证日志
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: control-v0.4-validation-${{ github.sha }}
+          name: control-v0.4-validation-${{ steps.source.outputs.sha }}
           path: validation-artifacts
           if-no-files-found: error
           retention-days: 30
