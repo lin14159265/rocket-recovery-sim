@@ -29,9 +29,12 @@ jobs:
 
       - name: 核对分支与提交
         run: |
-          git status -sb
-          git rev-parse HEAD
-          git log -1 --oneline
+          mkdir -p validation-artifacts
+          {
+            git status -sb
+            git rev-parse HEAD
+            git log -5 --oneline
+          } 2>&1 | tee validation-artifacts/git-state.log
 
       - name: 配置 Node.js 22
         uses: actions/setup-node@v4
@@ -42,39 +45,39 @@ jobs:
       - name: 安装依赖
         id: install
         continue-on-error: true
-        run: npm install
+        run: npm install 2>&1 | tee validation-artifacts/npm-install.log
 
       - name: TypeScript 类型检查
         id: typecheck
         continue-on-error: true
-        run: npm run typecheck
+        run: npm run typecheck 2>&1 | tee validation-artifacts/typecheck.log
 
       - name: 全量测试
         id: test
         continue-on-error: true
-        run: npm test
+        run: npm test 2>&1 | tee validation-artifacts/test.log
 
       - name: 生产构建
         id: build
         continue-on-error: true
-        run: npm run build
+        run: npm run build 2>&1 | tee validation-artifacts/build.log
 
       - name: 名义 predictive 实验
         id: lab_predictive
         continue-on-error: true
-        run: npm run lab
+        run: npm run lab 2>&1 | tee validation-artifacts/lab-predictive.log
 
       - name: 名义 MPC 实验
         id: lab_mpc
         continue-on-error: true
-        run: npm run lab -- --algorithm mpc
+        run: npm run lab -- --algorithm mpc 2>&1 | tee validation-artifacts/lab-mpc.log
 
       - name: 当前 HEAD 20组配对实验
         id: monte_carlo
         continue-on-error: true
-        run: npm run lab:monte-carlo -- --runs 20 --seed 20260714
+        run: npm run lab:monte-carlo -- --runs 20 --seed 20260714 2>&1 | tee validation-artifacts/monte-carlo-20.log
 
-      - name: 汇总门禁结果
+      - name: 写入门禁汇总
         if: always()
         env:
           INSTALL: ${{ steps.install.outcome }}
@@ -85,18 +88,48 @@ jobs:
           LAB_MPC: ${{ steps.lab_mpc.outcome }}
           MONTE_CARLO: ${{ steps.monte_carlo.outcome }}
         run: |
-          printf '%s\n' \
-            "install=${INSTALL}" \
-            "typecheck=${TYPECHECK}" \
-            "test=${TEST}" \
-            "build=${BUILD}" \
-            "lab_predictive=${LAB_PREDICTIVE}" \
-            "lab_mpc=${LAB_MPC}" \
-            "monte_carlo=${MONTE_CARLO}"
-          test "${INSTALL}" = success
-          test "${TYPECHECK}" = success
-          test "${TEST}" = success
-          test "${BUILD}" = success
-          test "${LAB_PREDICTIVE}" = success
-          test "${LAB_MPC}" = success
-          test "${MONTE_CARLO}" = success
+          cat > validation-artifacts/summary.txt <<EOF
+          install=${INSTALL}
+          typecheck=${TYPECHECK}
+          test=${TEST}
+          build=${BUILD}
+          lab_predictive=${LAB_PREDICTIVE}
+          lab_mpc=${LAB_MPC}
+          monte_carlo=${MONTE_CARLO}
+          EOF
+          cat validation-artifacts/summary.txt
+
+      - name: 上传完整验证日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: control-v0.4-validation-${{ github.sha }}
+          path: validation-artifacts
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 执行最终门禁
+        if: always()
+        env:
+          INSTALL: ${{ steps.install.outcome }}
+          TYPECHECK: ${{ steps.typecheck.outcome }}
+          TEST: ${{ steps.test.outcome }}
+          BUILD: ${{ steps.build.outcome }}
+          LAB_PREDICTIVE: ${{ steps.lab_predictive.outcome }}
+          LAB_MPC: ${{ steps.lab_mpc.outcome }}
+          MONTE_CARLO: ${{ steps.monte_carlo.outcome }}
+        run: |
+          failed=0
+          for result in \
+            "${INSTALL}" \
+            "${TYPECHECK}" \
+            "${TEST}" \
+            "${BUILD}" \
+            "${LAB_PREDICTIVE}" \
+            "${LAB_MPC}" \
+            "${MONTE_CARLO}"; do
+            if [ "${result}" != "success" ]; then
+              failed=1
+            fi
+          done
+          exit "${failed}"
