@@ -22,9 +22,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - name: 检出当前分支
+      - name: 检出 codex/control-v0.4 纯分支 HEAD
         uses: actions/checkout@v4
         with:
+          ref: codex/control-v0.4
           fetch-depth: 0
 
       - name: 核对分支与提交
@@ -33,6 +34,7 @@ jobs:
           {
             git status -sb
             git rev-parse HEAD
+            git merge-base --is-ancestor b0af39cfb97b8e54089a8b7989e7ccca5447b1b2 HEAD
             git log -5 --oneline
           } 2>&1 | tee validation-artifacts/git-state.log
 
