@@ -1,4 +1,4 @@
-import type { AlgorithmMode, ScenarioConfig } from "./contracts";
+import type { AlgorithmMode, MpcFallbackCounts, ScenarioConfig } from "./contracts";
 import { DeterministicRng } from "./engine/rng";
 import { runSimulation, type SimulationOptions } from "./simulation";
 
@@ -67,6 +67,12 @@ export interface ExperimentTrialResult {
   missDistanceM: number | null;
   failureReason: string | null;
   failureStage: FailureStage;
+  capturePlaneCenterErrorM: number;
+  captureRelativeSpeedMps: number;
+  captureTiltRad: number;
+  predictionTimeErrorS: number;
+  mpcFallbackCount: number;
+  mpcFallbackReasons: MpcFallbackCounts;
 }
 
 export type FailureStage =
@@ -93,6 +99,8 @@ export interface AlgorithmExperimentSummary {
   meanMissDistanceM: number | null;
   failureReasons: Record<string, number>;
   failureStages: Record<FailureStage, number>;
+  mpcFallbackCount: number;
+  mpcFallbackReasons: MpcFallbackCounts;
 }
 
 export interface AlgorithmComparisonProgress {
@@ -345,8 +353,17 @@ const summarize = (
     "none", "estimation", "unreachable", "handshake", "missed", "overspeed",
     "attitude", "rope-break", "captured-not-secured"
   ].map((stage) => [stage, 0])) as Record<FailureStage, number>;
+  const mpcFallbackReasons: MpcFallbackCounts = {
+    "stale-input": 0,
+    "strength-proxy": 0,
+    "non-finite": 0,
+    "not-converged": 0
+  };
   for (const trial of trials) {
     failureStages[trial.failureStage] += 1;
+    for (const reason of Object.keys(mpcFallbackReasons) as Array<keyof MpcFallbackCounts>) {
+      mpcFallbackReasons[reason] += trial.mpcFallbackReasons[reason];
+    }
     if (trial.failureReason === null) continue;
     failureReasons[trial.failureReason] = (failureReasons[trial.failureReason] ?? 0) + 1;
   }
@@ -362,7 +379,9 @@ const summarize = (
     missEvaluatedRuns: misses.length,
     meanMissDistanceM: misses.length === 0 ? null : mean(misses),
     failureReasons,
-    failureStages
+    failureStages,
+    mpcFallbackCount: trials.reduce((sum, trial) => sum + trial.mpcFallbackCount, 0),
+    mpcFallbackReasons
   };
 };
 
@@ -405,7 +424,13 @@ export const runAlgorithmComparison = (
         peakLoadN: metrics.peakContactForceN,
         missDistanceM: evaluated ? metrics.missDistanceM : null,
         failureReason,
-        failureStage: classifyFailureStage(metrics.secured, metrics.captured, failureReason)
+        failureStage: classifyFailureStage(metrics.secured, metrics.captured, failureReason),
+        capturePlaneCenterErrorM: metrics.capturePlaneCenterErrorM,
+        captureRelativeSpeedMps: metrics.captureRelativeSpeedMps,
+        captureTiltRad: metrics.captureTiltRad,
+        predictionTimeErrorS: metrics.predictionTimeErrorS,
+        mpcFallbackCount: metrics.mpcFallbackCount,
+        mpcFallbackReasons: { ...metrics.mpcFallbackReasons }
       });
       options.onProgress?.({
         completed: trials.length,

@@ -112,6 +112,8 @@ interface EstimatorLike {
 
 export const SIMULATION_MODEL_VERSION = "0.3.1";
 
+const MPC_ACTIVE_DAMPING_SCALE = 0.99;
+
 const terminalSupervisorStates = new Set<SupervisorState>([
   "SECURED",
   "MISSED",
@@ -418,6 +420,10 @@ const currentMetrics = (
   coordinator: CaptureCoordinatorOutput | null
 ) => {
   const metrics = accumulator.snapshot();
+  if (coordinator !== null) {
+    metrics.mpcFallbackCount = coordinator.mpcFallbackCount;
+    metrics.mpcFallbackReasons = { ...coordinator.mpcFallbackReasons };
+  }
   if (coordinator !== null && ["ABORT", "MISSED", "BROKEN"].includes(coordinator.state)) {
     metrics.failed = true;
     metrics.failureReason = coordinator.abortReason ?? metrics.failureReason ??
@@ -661,7 +667,7 @@ export const runSimulation = (
   const standbyActiveDampingNspm = Math.min(
     config.net.activeDampingMaxNspm,
     Math.max(config.net.activeDampingMinNspm, config.net.totalDampingNspm / 5)
-  );
+  ) * (config.controller.algorithm === "mpc" ? MPC_ACTIVE_DAMPING_SCALE : 1);
   let tensionControllerOutputs = WINCH_IDS.map(() => ({
     desiredDampingNspm: standbyActiveDampingNspm,
     integralErrorNs: 0,
@@ -731,7 +737,13 @@ export const runSimulation = (
           (output) => output.saturated
         ) as [boolean, boolean, boolean, boolean],
         mpc: coordinatorOutput?.mpcDiagnostics ?? null,
-        mpcFallbackCount: coordinatorOutput?.mpcFallbackCount ?? 0
+        mpcFallbackCount: coordinatorOutput?.mpcFallbackCount ?? 0,
+        mpcFallbackReasons: coordinatorOutput?.mpcFallbackReasons ?? {
+          "stale-input": 0,
+          "strength-proxy": 0,
+          "non-finite": 0,
+          "not-converged": 0
+        }
       },
       supervisorState: coordinatorOutput?.state ?? "BOOT",
       radioStats: boundedNetworkStats(radio),
@@ -1277,6 +1289,9 @@ export const runSimulation = (
     : Math.sqrt(tensionErrorSquaredSum / tensionErrorSampleCount);
   finalMetrics.constraintActivationCount = constraintActivationCount;
   finalMetrics.mpcFallbackCount = coordinatorOutput?.mpcFallbackCount ?? 0;
+  finalMetrics.mpcFallbackReasons = coordinatorOutput?.mpcFallbackReasons === undefined
+    ? { "stale-input": 0, "strength-proxy": 0, "non-finite": 0, "not-converged": 0 }
+    : { ...coordinatorOutput.mpcFallbackReasons };
   const exactFinalSnapshot: SimulationSnapshot = {
     runId,
     tick: plantState.tick,

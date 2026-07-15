@@ -25,11 +25,14 @@ describe("deterministic cooperative MPC", () => {
     expect(solution.diagnostics.fallbackReason).toBe("none");
     expect(solution.diagnostics.iterations).toBeLessThanOrEqual(40);
     expect(Math.hypot(...solution.rocketAccelerationReferenceMps2))
-      .toBeLessThanOrEqual(config.rocket.lateralAccelerationLimitMps2);
+      .toBeLessThanOrEqual(0.65);
     expect(Math.hypot(...solution.netAccelerationReferenceMps2))
-      .toBeLessThanOrEqual(config.net.winchMaxAccelerationMps2);
+      .toBeLessThanOrEqual(1.5);
     expect(Math.abs(solution.halfSpacingClosureRateMps))
-      .toBeLessThanOrEqual(config.net.winchMaxSpeedMps);
+      .toBeLessThanOrEqual(0.75);
+    expect(solution.diagnostics.baselineObjective).toBeGreaterThan(0);
+    expect(solution.diagnostics.baselineTerminalErrorM).toBeGreaterThanOrEqual(0);
+    expect(solution.diagnostics.optimizedTerminalErrorM).toBeGreaterThanOrEqual(0);
   });
 
   it("is bit-repeatable including iterations and active constraints", () => {
@@ -39,6 +42,19 @@ describe("deterministic cooperative MPC", () => {
     const second = new CooperativeMpcPlanner(config.controller, config.rocket, config.net)
       .solve(input());
     expect(second).toEqual(first);
+  });
+
+  it("falls back when the fixed iteration budget cannot converge", () => {
+    const config = createNominalScenario();
+    config.controller.mpc.maximumIterations = 1;
+    config.controller.mpc.convergenceTolerance = 1e-12;
+    const solution = new CooperativeMpcPlanner(config.controller, config.rocket, config.net)
+      .solve(input());
+
+    expect(solution.diagnostics.converged).toBe(false);
+    expect(solution.diagnostics.fallbackReason).toBe("not-converged");
+    expect(solution.rocketAccelerationReferenceMps2).toEqual([0, 0]);
+    expect(solution.netAccelerationReferenceMps2).toEqual([0, 0]);
   });
 
   it("falls back for stale or unsafe inputs without emitting a control reference", () => {

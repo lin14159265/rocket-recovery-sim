@@ -179,7 +179,11 @@ export const createNominalScenario = (): ScenarioConfig => ({
     "controller.prediction": source("assumed", "真实交会预测器未公开", "50 ms 制导感知滚动、30 s 上限和 3σ 包络为研究设置"),
     "controller.guidance": source("calibrated", "公开资料未披露终端制导包络", "按当前代理初态整定的速度包络和关机高度"),
     "controller.tension": source("calibrated", "依据当前四绳等效模型局部整定", "PI 参数仅保证代理执行器限幅和抗积分饱和行为"),
-    "controller.mpc": source("assumed", "真实协同优化器未公开", "确定性投影梯度 QP 的研究预算"),
+    "controller.mpc": source(
+      "assumed",
+      "真实协同优化器未公开",
+      "40步投影梯度预算、信赖域、0.17增量权限与0.99主动阻尼调度均为本代理模型研究整定"
+    ),
     radio: source("assumed", "真实通信体制未公开", "用于压力测试的候选链路"),
     sensors: source("assumed", "真实传感器配置未公开", "用于候选估计算法比较"),
     faults: source("assumed", "故障时序与幅值未公开", "仅用于闭环鲁棒性压力试验")

@@ -116,4 +116,18 @@ describe("multi-rate recovery simulation", () => {
     expect(faultEvents[0]?.message).toMatch(/导航偏置阶跃/);
   });
 
+  it("is bit-repeatable in MPC mode including iterations and fallback reasons", () => {
+    const config = createNominalScenario();
+    config.controller.algorithm = "mpc";
+    const first = runSimulation(config, { frameRateHz: 1, stopOnTerminal: true });
+    const second = runSimulation(config, { frameRateHz: 1, stopOnTerminal: true });
+
+    expect(second.metrics).toEqual(first.metrics);
+    expect(second.events).toEqual(first.events);
+    expect(second.telemetry).toEqual(first.telemetry);
+    expect(second.metrics.mpcFallbackReasons).toEqual(first.metrics.mpcFallbackReasons);
+    expect(second.telemetry.map((sample) => sample.mpcIterations))
+      .toEqual(first.telemetry.map((sample) => sample.mpcIterations));
+  });
+
 });

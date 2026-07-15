@@ -400,6 +400,14 @@ export interface NetworkStats {
   lastValidDeliveryTick: number;
 }
 
+
+export interface MpcFallbackCounts {
+  "stale-input": number;
+  "strength-proxy": number;
+  "non-finite": number;
+  "not-converged": number;
+}
+
 export interface RecoveryMetrics {
   captured: boolean;
   secured: boolean;
@@ -419,6 +427,7 @@ export interface RecoveryMetrics {
   tensionRmsErrorN: number;
   constraintActivationCount: number;
   mpcFallbackCount: number;
+  mpcFallbackReasons: MpcFallbackCounts;
 }
 
 /** Physics-tick work and storage ledger for the contact phase. */
@@ -492,6 +501,9 @@ export interface SnapshotMpcDiagnostics {
   optimalityResidual: number;
   constraintActivations: number;
   activeConstraints: string[];
+  baselineObjective: number;
+  baselineTerminalErrorM: number;
+  optimizedTerminalErrorM: number;
 }
 
 export interface ControlDiagnostics {
@@ -511,6 +523,7 @@ export interface ControlDiagnostics {
   tensionSaturated: [boolean, boolean, boolean, boolean];
   mpc: SnapshotMpcDiagnostics | null;
   mpcFallbackCount: number;
+  mpcFallbackReasons: MpcFallbackCounts;
 }
 
 export interface SimulationSnapshot {

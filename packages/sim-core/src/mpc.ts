@@ -32,6 +32,9 @@ export interface MpcDiagnostics {
   optimalityResidual: number;
   constraintActivations: number;
   activeConstraints: string[];
+  baselineObjective: number;
+  baselineTerminalErrorM: number;
+  optimizedTerminalErrorM: number;
 }
 
 export interface CooperativeMpcSolution {
@@ -49,6 +52,7 @@ interface RolloutResult {
   netFinalM: [number, number];
   netFinalVelocityMps: [number, number];
   spacingFinalM: number;
+  terminalRelativeErrorM: number;
 }
 
 const finiteInput = (input: CooperativeMpcInput): boolean => [
@@ -109,7 +113,10 @@ export class CooperativeMpcPlanner {
         projectedPeakLoadN,
         optimalityResidual: Number.POSITIVE_INFINITY,
         constraintActivations: 0,
-        activeConstraints: []
+        activeConstraints: [],
+        baselineObjective: Number.POSITIVE_INFINITY,
+        baselineTerminalErrorM: Number.POSITIVE_INFINITY,
+        optimizedTerminalErrorM: Number.POSITIVE_INFINITY
       }
     });
 
@@ -137,18 +144,25 @@ export class CooperativeMpcPlanner {
       );
     }
 
-    const timeHorizonS = Math.min(
-      horizon * stepS,
-      Math.max(stepS, input.timeToInterceptS)
+    const effectiveSteps = Math.max(
+      1,
+      Math.min(horizon, Math.ceil(Math.max(stepS, input.timeToInterceptS) / stepS))
     );
-    const rocketReference = magnitudeClamp(
-      0.22 * (input.predictedInterceptCenterM[0] - input.rocketPositionM[0]) -
-        0.72 * input.rocketVelocityMps[0],
-      0.22 * (input.predictedInterceptCenterM[1] - input.rocketPositionM[1]) -
-        0.72 * input.rocketVelocityMps[1],
+    const timeHorizonS = effectiveSteps * stepS;
+
+    // The 100 Hz rocket and net loops already implement the predictive baseline.
+    // MPC therefore optimises bounded increments around those commands instead
+    // of issuing a second full-authority absolute command on top of them.
+    const rocketBaseline = magnitudeClamp(
+      this.controller.rocketPositionKp *
+          (input.predictedInterceptCenterM[0] - input.rocketPositionM[0]) -
+        this.controller.rocketVelocityKd * input.rocketVelocityMps[0],
+      this.controller.rocketPositionKp *
+          (input.predictedInterceptCenterM[1] - input.rocketPositionM[1]) -
+        this.controller.rocketVelocityKd * input.rocketVelocityMps[1],
       this.rocket.lateralAccelerationLimitMps2
     );
-    const netReference = magnitudeClamp(
+    const netBaseline = magnitudeClamp(
       this.controller.netCenterKp * (input.predictedInterceptCenterM[0] - input.netCenterM[0]) -
         this.controller.netCenterKd * input.netCenterVelocityMps[0],
       this.controller.netCenterKp * (input.predictedInterceptCenterM[1] - input.netCenterM[1]) -
@@ -156,26 +170,25 @@ export class CooperativeMpcPlanner {
       this.net.winchMaxAccelerationMps2
     );
     const meanSpacingM = (input.halfSpacingM[0] + input.halfSpacingM[1]) / 2;
-    const closureReferenceMps = clamp(
+    const closureBaselineMps = clamp(
       (this.net.closedHalfSpacingM - meanSpacingM) / timeHorizonS,
       -this.net.winchMaxSpeedMps,
       this.net.winchMaxSpeedMps
     );
-    if (this.warmStart === null) {
-      for (let step = 0; step < horizon; step += 1) {
-        const index = step * VARIABLES_PER_STEP;
-        values[index] = rocketReference[0];
-        values[index + 1] = rocketReference[1];
-        values[index + 2] = netReference[0];
-        values[index + 3] = netReference[1];
-        values[index + 4] = closureReferenceMps;
-      }
-    }
+    const rocketTrustRadiusMps2 = Math.min(
+      0.65,
+      this.rocket.lateralAccelerationLimitMps2 * 0.2
+    );
+    const netTrustRadiusMps2 = Math.min(
+      1.5,
+      this.net.winchMaxAccelerationMps2 * 0.15
+    );
+    const closureTrustRadiusMps = Math.min(0.75, this.net.winchMaxSpeedMps * 0.15);
 
     const gradient = new Float64Array(variableCount);
     const weights = {
-      reference: 0.35 + Math.min(2, input.communicationAgeS * 4),
-      smooth: 0.18,
+      increment: 2.4 + Math.min(4, input.communicationAgeS * 8),
+      smooth: 0.35,
       relativePosition: 8,
       relativeVelocity: 1.4,
       netTarget: 3,
@@ -189,14 +202,11 @@ export class CooperativeMpcPlanner {
       const netVelocity: [number, number] = [...input.netCenterVelocityMps];
       let spacingM = meanSpacingM;
       let objective = 0;
-      for (let step = 0; step < horizon; step += 1) {
+      for (let step = 0; step < effectiveSteps; step += 1) {
         const index = step * VARIABLES_PER_STEP;
-        const references = [
-          rocketReference[0], rocketReference[1], netReference[0], netReference[1], closureReferenceMps
-        ];
         for (let variable = 0; variable < VARIABLES_PER_STEP; variable += 1) {
-          const error = (values[index + variable] ?? 0) - (references[variable] ?? 0);
-          objective += weights.reference * error * error;
+          const increment = values[index + variable] ?? 0;
+          objective += weights.increment * increment * increment;
           if (step > 0) {
             const delta = (values[index + variable] ?? 0) -
               (values[index + variable - VARIABLES_PER_STEP] ?? 0);
@@ -204,12 +214,14 @@ export class CooperativeMpcPlanner {
           }
         }
         for (const axis of [0, 1] as const) {
-          rocketVelocity[axis] += (values[index + axis] ?? 0) * stepS;
+          const rocketAccelerationMps2 = rocketBaseline[axis] + (values[index + axis] ?? 0);
+          const netAccelerationMps2 = netBaseline[axis] + (values[index + 2 + axis] ?? 0);
+          rocketVelocity[axis] += rocketAccelerationMps2 * stepS;
           rocketPosition[axis] += rocketVelocity[axis] * stepS;
-          netVelocity[axis] += (values[index + 2 + axis] ?? 0) * stepS;
+          netVelocity[axis] += netAccelerationMps2 * stepS;
           netPosition[axis] += netVelocity[axis] * stepS;
         }
-        spacingM += (values[index + 4] ?? 0) * stepS;
+        spacingM += (closureBaselineMps + (values[index + 4] ?? 0)) * stepS;
       }
       const relativeError: [number, number] = [
         rocketPosition[0] - netPosition[0],
@@ -234,7 +246,8 @@ export class CooperativeMpcPlanner {
         rocketFinalVelocityMps: rocketVelocity,
         netFinalM: netPosition,
         netFinalVelocityMps: netVelocity,
-        spacingFinalM: spacingM
+        spacingFinalM: spacingM,
+        terminalRelativeErrorM: Math.hypot(relativeError[0], relativeError[1])
       };
     };
 
@@ -247,24 +260,48 @@ export class CooperativeMpcPlanner {
       let previousClosureRate = (input.halfSpacingRateMps[0] + input.halfSpacingRateMps[1]) / 2;
       for (let step = 0; step < horizon; step += 1) {
         const index = step * VARIABLES_PER_STEP;
-        const rocketLimited = magnitudeClamp(
+        if (step >= effectiveSteps) {
+          values.fill(0, index, index + VARIABLES_PER_STEP);
+          continue;
+        }
+
+        const rocketIncrementLimited = magnitudeClamp(
           values[index] ?? 0,
           values[index + 1] ?? 0,
+          rocketTrustRadiusMps2
+        );
+        if (rocketIncrementLimited[2]) {
+          constraintActivations += 1;
+          activeConstraints.add("rocket-trust-region");
+        }
+        const rocketTotalLimited = magnitudeClamp(
+          rocketBaseline[0] + rocketIncrementLimited[0],
+          rocketBaseline[1] + rocketIncrementLimited[1],
           this.rocket.lateralAccelerationLimitMps2
         );
-        values[index] = rocketLimited[0];
-        values[index + 1] = rocketLimited[1];
-        if (rocketLimited[2]) {
+        values[index] = rocketTotalLimited[0] - rocketBaseline[0];
+        values[index + 1] = rocketTotalLimited[1] - rocketBaseline[1];
+        if (rocketTotalLimited[2]) {
           constraintActivations += 1;
           activeConstraints.add("rocket-lateral-acceleration");
         }
-        const netLimited = magnitudeClamp(
+
+        const netIncrementLimited = magnitudeClamp(
           values[index + 2] ?? 0,
           values[index + 3] ?? 0,
+          netTrustRadiusMps2
+        );
+        if (netIncrementLimited[2]) {
+          constraintActivations += 1;
+          activeConstraints.add("net-trust-region");
+        }
+        const netTotalLimited = magnitudeClamp(
+          netBaseline[0] + netIncrementLimited[0],
+          netBaseline[1] + netIncrementLimited[1],
           this.net.winchMaxAccelerationMps2
         );
         for (const axis of [0, 1] as const) {
-          let acceleration = netLimited[axis];
+          let acceleration = netTotalLimited[axis];
           const nextVelocity = clamp(
             netVelocity[axis] + acceleration * stepS,
             -this.net.winchMaxSpeedMps,
@@ -286,13 +323,23 @@ export class CooperativeMpcPlanner {
             constraintActivations += 1;
             activeConstraints.add("net-center-travel");
           }
-          values[index + 2 + axis] = acceleration;
+          values[index + 2 + axis] = acceleration - netBaseline[axis];
           netVelocity[axis] += acceleration * stepS;
           netPosition[axis] += netVelocity[axis] * stepS;
         }
+
         const rateDeltaLimit = this.net.winchMaxAccelerationMps2 * stepS;
-        let closureRate = clamp(
+        const closureIncrement = clamp(
           values[index + 4] ?? 0,
+          -closureTrustRadiusMps,
+          closureTrustRadiusMps
+        );
+        if (closureIncrement !== (values[index + 4] ?? 0)) {
+          constraintActivations += 1;
+          activeConstraints.add("closure-trust-region");
+        }
+        let closureRate = clamp(
+          closureBaselineMps + closureIncrement,
           previousClosureRate - rateDeltaLimit,
           previousClosureRate + rateDeltaLimit
         );
@@ -307,12 +354,17 @@ export class CooperativeMpcPlanner {
           constraintActivations += 1;
           activeConstraints.add("half-spacing");
         }
-        values[index + 4] = closureRate;
+        values[index + 4] = closureRate - closureBaselineMps;
         previousClosureRate = closureRate;
         spacingM = nextSpacing;
       }
     };
 
+    const savedWarmStart = new Float64Array(values);
+    values.fill(0);
+    project();
+    const baseline = rollout();
+    values.set(savedWarmStart);
     project();
     let converged = false;
     let iterations = 0;
@@ -339,16 +391,12 @@ export class CooperativeMpcPlanner {
       ];
       const spacingError = result.spacingFinalM - this.net.closedHalfSpacingM;
       const previousValues = new Float64Array(values);
-      for (let step = 0; step < horizon; step += 1) {
+      for (let step = 0; step < effectiveSteps; step += 1) {
         const index = step * VARIABLES_PER_STEP;
-        const remainingS = (horizon - step - 0.5) * stepS;
-        const references = [
-          rocketReference[0], rocketReference[1], netReference[0], netReference[1], closureReferenceMps
-        ];
+        const remainingS = (effectiveSteps - step - 0.5) * stepS;
         for (let variable = 0; variable < VARIABLES_PER_STEP; variable += 1) {
           gradient[index + variable] = (gradient[index + variable] ?? 0) +
-            2 * weights.reference *
-              ((values[index + variable] ?? 0) - (references[variable] ?? 0));
+            2 * weights.increment * (values[index + variable] ?? 0);
           if (step > 0) {
             gradient[index + variable] = (gradient[index + variable] ?? 0) +
               2 * weights.smooth *
@@ -404,6 +452,9 @@ export class CooperativeMpcPlanner {
       failed.diagnostics.optimalityResidual = optimalityResidual;
       failed.diagnostics.constraintActivations = constraintActivations;
       failed.diagnostics.activeConstraints = [...activeConstraints].sort();
+      failed.diagnostics.baselineObjective = baseline.objective;
+      failed.diagnostics.baselineTerminalErrorM = baseline.terminalRelativeErrorM;
+      failed.diagnostics.optimizedTerminalErrorM = final.terminalRelativeErrorM;
       return failed;
     }
     this.warmStart = new Float64Array(values);
@@ -420,7 +471,10 @@ export class CooperativeMpcPlanner {
         projectedPeakLoadN,
         optimalityResidual,
         constraintActivations,
-        activeConstraints: [...activeConstraints].sort()
+        activeConstraints: [...activeConstraints].sort(),
+        baselineObjective: baseline.objective,
+        baselineTerminalErrorM: baseline.terminalRelativeErrorM,
+        optimizedTerminalErrorM: final.terminalRelativeErrorM
       }
     };
   }

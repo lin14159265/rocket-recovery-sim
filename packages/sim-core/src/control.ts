@@ -5,6 +5,7 @@ import type {
   ControllerConfig,
   NetConfig,
   LinkConfig,
+  MpcFallbackCounts,
   Quat,
   RocketConfig,
   StateEstimate,
@@ -32,8 +33,13 @@ import type { CapturePlanePrediction } from "./estimation";
 import {
   CooperativeMpcPlanner,
   type CooperativeMpcSolution,
-  type MpcDiagnostics
+  type MpcDiagnostics,
+  type MpcFallbackReason
 } from "./mpc";
+
+// Assumed supervisory tuning: retain only 17% of the bounded MPC increment
+// around the predictive baseline. It is not a published vehicle parameter.
+const MPC_INCREMENT_AUTHORITY = 0.17;
 
 export interface RocketControllerInput {
   estimate: StateEstimate;
@@ -416,6 +422,7 @@ export interface CaptureCoordinatorOutput {
   mpcDiagnostics: MpcDiagnostics | null;
   mpcRocketAccelerationReferenceMps2: [number, number];
   mpcFallbackCount: number;
+  mpcFallbackReasons: MpcFallbackCounts;
   mpcSolveCount: number;
   reachabilityMarginS: number;
   abortReason: string | null;
@@ -701,6 +708,12 @@ export class CaptureCoordinator {
   private mpcSolution: CooperativeMpcSolution | null = null;
   private lastMpcSolveTick = -1;
   private mpcFallbackCount = 0;
+  private mpcFallbackReasons: MpcFallbackCounts = {
+    "stale-input": 0,
+    "strength-proxy": 0,
+    "non-finite": 0,
+    "not-converged": 0
+  };
   private mpcSolveCount = 0;
   private abortReasonValue: string | null = null;
 
@@ -759,6 +772,12 @@ export class CaptureCoordinator {
     this.mpcSolution = null;
     this.lastMpcSolveTick = -1;
     this.mpcFallbackCount = 0;
+    this.mpcFallbackReasons = {
+      "stale-input": 0,
+      "strength-proxy": 0,
+      "non-finite": 0,
+      "not-converged": 0
+    };
     this.mpcSolveCount = 0;
     this.abortReasonValue = null;
   }
@@ -934,7 +953,9 @@ export class CaptureCoordinator {
       predictedRelativeInterceptVelocityMps: [...relativePrediction.predictedInterceptVelocityMps],
       rocketLateralAccelerationReferenceMps2:
         this.mpcSolution?.diagnostics.converged === true
-          ? [...this.mpcSolution.rocketAccelerationReferenceMps2]
+          ? this.mpcSolution.rocketAccelerationReferenceMps2.map(
+              (value) => value * MPC_INCREMENT_AUTHORITY
+            ) as [number, number]
           : [0, 0],
       predictionUncertaintyM: [
         Math.sqrt(relativePrediction.horizontalVarianceM2[0]) * this.controller.prediction.confidenceSigma,
@@ -1069,7 +1090,11 @@ export class CaptureCoordinator {
     this.lastMpcSolveTick = input.tick;
     this.mpcSolveCount += 1;
     this.mpcSolution = solution;
-    if (!solution.diagnostics.converged) this.mpcFallbackCount += 1;
+    if (!solution.diagnostics.converged) {
+      this.mpcFallbackCount += 1;
+      const reason: MpcFallbackReason = solution.diagnostics.fallbackReason;
+      if (reason !== "none") this.mpcFallbackReasons[reason] += 1;
+    }
   }
 
   private servoNetCenter(
@@ -1173,7 +1198,8 @@ export class CaptureCoordinator {
     if (this.mpcSolution?.diagnostics.converged === true) {
       for (const axis of [0, 1] as const) {
         plannedCenterVelocity[axis] +=
-          this.mpcSolution.netAccelerationReferenceMps2[axis] * this.controller.mpc.stepS;
+          this.mpcSolution.netAccelerationReferenceMps2[axis] *
+            this.controller.mpc.stepS * MPC_INCREMENT_AUTHORITY;
       }
     }
     if (
@@ -1576,9 +1602,12 @@ export class CaptureCoordinator {
           },
       mpcRocketAccelerationReferenceMps2:
         this.mpcSolution?.diagnostics.converged === true
-          ? [...this.mpcSolution.rocketAccelerationReferenceMps2]
+          ? this.mpcSolution.rocketAccelerationReferenceMps2.map(
+              (value) => value * MPC_INCREMENT_AUTHORITY
+            ) as [number, number]
           : [0, 0],
       mpcFallbackCount: this.mpcFallbackCount,
+      mpcFallbackReasons: { ...this.mpcFallbackReasons },
       mpcSolveCount: this.mpcSolveCount,
       reachabilityMarginS: this.latestPlan === null
         ? 0

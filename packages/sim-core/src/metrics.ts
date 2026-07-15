@@ -20,7 +20,13 @@ const createInitialMetrics = (): RecoveryMetrics => ({
   readyRoundTripS: 0,
   tensionRmsErrorN: 0,
   constraintActivationCount: 0,
-  mpcFallbackCount: 0
+  mpcFallbackCount: 0,
+  mpcFallbackReasons: {
+    "stale-input": 0,
+    "strength-proxy": 0,
+    "non-finite": 0,
+    "not-converged": 0
+  }
 });
 
 /** Accumulates run-level recovery outcomes and model-derived peak values. */
@@ -76,7 +82,10 @@ export class RecoveryMetricsAccumulator {
 
   /** Returns a copy so callers cannot mutate the accumulator's state. */
   public snapshot(): RecoveryMetrics {
-    return { ...this.metrics };
+    return {
+      ...this.metrics,
+      mpcFallbackReasons: { ...this.metrics.mpcFallbackReasons }
+    };
   }
 
   private updatePeaks(
