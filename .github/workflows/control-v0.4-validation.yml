@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - codex/control-v0.4
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
