@@ -1,0 +1,99 @@
+name: v0.4 控制与验收验证
+
+on:
+  push:
+    branches:
+      - codex/control-v0.4
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: control-v0.4-validation-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: 完整质量门禁与20组配对实验
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: 检出当前分支
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 核对分支与提交
+        run: |
+          git status -sb
+          git rev-parse HEAD
+          git log -1 --oneline
+
+      - name: 配置 Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: 安装依赖
+        id: install
+        continue-on-error: true
+        run: npm install
+
+      - name: TypeScript 类型检查
+        id: typecheck
+        continue-on-error: true
+        run: npm run typecheck
+
+      - name: 全量测试
+        id: test
+        continue-on-error: true
+        run: npm test
+
+      - name: 生产构建
+        id: build
+        continue-on-error: true
+        run: npm run build
+
+      - name: 名义 predictive 实验
+        id: lab_predictive
+        continue-on-error: true
+        run: npm run lab
+
+      - name: 名义 MPC 实验
+        id: lab_mpc
+        continue-on-error: true
+        run: npm run lab -- --algorithm mpc
+
+      - name: 当前 HEAD 20组配对实验
+        id: monte_carlo
+        continue-on-error: true
+        run: npm run lab:monte-carlo -- --runs 20 --seed 20260714
+
+      - name: 汇总门禁结果
+        if: always()
+        env:
+          INSTALL: ${{ steps.install.outcome }}
+          TYPECHECK: ${{ steps.typecheck.outcome }}
+          TEST: ${{ steps.test.outcome }}
+          BUILD: ${{ steps.build.outcome }}
+          LAB_PREDICTIVE: ${{ steps.lab_predictive.outcome }}
+          LAB_MPC: ${{ steps.lab_mpc.outcome }}
+          MONTE_CARLO: ${{ steps.monte_carlo.outcome }}
+        run: |
+          printf '%s\n' \
+            "install=${INSTALL}" \
+            "typecheck=${TYPECHECK}" \
+            "test=${TEST}" \
+            "build=${BUILD}" \
+            "lab_predictive=${LAB_PREDICTIVE}" \
+            "lab_mpc=${LAB_MPC}" \
+            "monte_carlo=${MONTE_CARLO}"
+          test "${INSTALL}" = success
+          test "${TYPECHECK}" = success
+          test "${TEST}" = success
+          test "${BUILD}" = success
+          test "${LAB_PREDICTIVE}" = success
+          test "${LAB_MPC}" = success
+          test "${MONTE_CARLO}" = success
