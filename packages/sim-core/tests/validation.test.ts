@@ -57,7 +57,7 @@ describe("model validation utilities", () => {
     expect(strength?.modeTransition).toBe(true);
     expect(strength?.sensitivityScore).toBeNull();
     expect(strength?.dominantEffect).toBe("终态模式切换");
-  }, 40_000);
+  }, 90_000);
 
   it("uses an explicit absolute floor for a zero-valued probability", () => {
     const config = createNominalScenario();

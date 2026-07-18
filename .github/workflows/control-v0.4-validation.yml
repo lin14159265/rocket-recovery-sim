@@ -21,6 +21,9 @@ jobs:
     name: 完整质量门禁与20组配对实验
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
     steps:
       - name: 检出 codex/control-v0.4 纯分支 HEAD
         uses: actions/checkout@v4
