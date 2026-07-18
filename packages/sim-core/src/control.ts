@@ -51,6 +51,8 @@ export interface RocketControllerInput {
   lateralAccelerationFeedforwardMps2?: [number, number];
   estimatedMassKg?: number;
   engineEnabled?: boolean;
+  /** Assumed independent terminal attitude actuator; defaults to engine availability. */
+  attitudeControlEnabled?: boolean;
 }
 
 export interface VerticalVelocityReferenceOptions {
@@ -282,6 +284,7 @@ export class RocketController {
 
   public compute(input: RocketControllerInput): ControlCommand {
     const engineEnabled = input.engineEnabled ?? true;
+    const attitudeControlEnabled = input.attitudeControlEnabled ?? engineEnabled;
     const massKg = input.estimatedMassKg ?? this.limits.massKg;
     if (!Number.isFinite(massKg) || massKg <= 0) {
       throw new RangeError("estimatedMassKg must be finite and greater than zero");
@@ -326,7 +329,7 @@ export class RocketController {
       this.config.attitudeKp * attitudeError[2] -
         this.config.attitudeKd * input.angularVelocityRadps[2]
     ];
-    const desiredTorque = engineEnabled
+    const desiredTorque = attitudeControlEnabled
       ? clampMagnitude3(requestedTorque, this.limits.torqueMaxNm)
       : ([0, 0, 0] as Vec3);
 

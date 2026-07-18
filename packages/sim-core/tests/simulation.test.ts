@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createNominalScenario } from "../src/config";
+import { tiltFromVertical } from "../src/math";
 import { runSimulation } from "../src/simulation";
 
 describe("multi-rate recovery simulation", () => {
@@ -16,6 +17,9 @@ describe("multi-rate recovery simulation", () => {
     );
     expect(run.metrics.captureTiltRad).toBeLessThanOrEqual(
       config.controller.maxCaptureTiltRad
+    );
+    expect(tiltFromVertical(run.finalSnapshot.rocket.attitudeWxyz)).toBeLessThan(
+      Math.PI / 60
     );
     expect(run.metrics.peakContactForceN).toBeLessThanOrEqual(
       config.net.totalStrengthLimitN

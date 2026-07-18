@@ -166,6 +166,20 @@ describe("rocket controller", () => {
     expect(cutoff.desiredThrustN).toBe(0);
     expect(cutoff.desiredTorqueNm).toEqual([0, 0, 0]);
     expect(cutoff.desiredAccelerationMps2[2]).toBe(-scenario.environment.gravityMps2);
+
+    const terminalAttitudeHold = controller.compute({
+      estimate: estimate(0, [0, 0, 40], [0, 0, -2]),
+      attitudeWxyz: [Math.SQRT1_2, Math.SQRT1_2, 0, 0],
+      angularVelocityRadps: [0.2, 0, 0],
+      targetPositionM: [0, 0, 40],
+      verticalVelocityReferenceMps: -2,
+      engineEnabled: false,
+      attitudeControlEnabled: true
+    });
+    expect(terminalAttitudeHold.desiredThrustN).toBe(0);
+    expect(norm(terminalAttitudeHold.desiredTorqueNm)).toBeGreaterThan(0);
+    expect(norm(terminalAttitudeHold.desiredTorqueNm))
+      .toBeLessThanOrEqual(scenario.rocket.torqueMaxNm + 1e-8);
   });
 });
 

@@ -109,6 +109,9 @@ const FrameStructure = memo(function FrameStructure({ config }: { config: Scenar
 const RocketModel = memo(function RocketModel({ config }: { config: ScenarioConfig }) {
   const bodyLength = config.rocket.lengthM;
   const radius = config.rocket.radiusM;
+  // Visual proxy only: one fifth of the cylindrical body below the nose.
+  // The current plant still uses the centre of mass as its equivalent capture point.
+  const attachmentBandOffsetM = bodyLength * 0.3;
   return (
     <group>
       <mesh castShadow>
@@ -123,7 +126,7 @@ const RocketModel = memo(function RocketModel({ config }: { config: ScenarioConf
         <coneGeometry args={[radius * 0.82, radius * 1.5, 24]} />
         <meshStandardMaterial color="#4e5961" metalness={0.82} roughness={0.24} />
       </mesh>
-      <mesh position={[0, bodyLength * 0.13, 0]}>
+      <mesh position={[0, attachmentBandOffsetM, 0]}>
         <cylinderGeometry args={[radius * 1.015, radius * 1.015, 0.58, 28]} />
         <meshStandardMaterial color="#131b22" metalness={0.48} roughness={0.4} />
       </mesh>

@@ -1115,6 +1115,12 @@ export const runSimulation = (
       const engineCutoff = committed && altitudeAbovePlaneM <= engineCutoffHeightM;
       const engineEnabled = !engineCutoff &&
         !["CONTACT", "ARREST", "SECURED"].includes(coordinatorOutput?.state ?? "BOOT");
+      // Assumed independent attitude-control proxy: after main-engine cutoff it
+      // keeps damping/erecting the captured stage, but is unavailable in terminal
+      // failure states. This is a research-model assumption, not a public fact.
+      const attitudeControlEnabled = !["ABORT", "BROKEN", "MISSED"].includes(
+        coordinatorOutput?.state ?? "BOOT"
+      );
       // Both endpoints converge on the frozen relative capture centre after
       // PREPARE. Before that, the rocket follows the nominal mission-frame
       // deck centre while the coordinator only observes and predicts.
@@ -1137,7 +1143,8 @@ export const runSimulation = (
           config.controller.algorithm === "mpc" && agreedPlanAtRocket !== null
             ? mpcGuidanceAtRocket
             : [0, 0],
-        engineEnabled
+        engineEnabled,
+        attitudeControlEnabled
       });
       if (windowActive(timeS, config.faults.thrustScale)) {
         command.desiredThrustN *= config.faults.thrustScale.scale;
