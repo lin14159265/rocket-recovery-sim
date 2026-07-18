@@ -37,6 +37,11 @@ const TelemetryCharts = lazy(async () => {
   return { default: module.TelemetryCharts };
 });
 
+const AlgorithmWorkspace = lazy(async () => {
+  const module = await import("./AlgorithmWorkspace");
+  return { default: module.AlgorithmWorkspace };
+});
+
 export type InspectorTab = "scenario" | "communications" | "algorithm" | "experiment" | "evidence";
 
 export type DashboardPreset =
@@ -173,14 +178,14 @@ const stateToneForFrame = (
   return "active";
 };
 
-function MetricStrip({ frame, run }: { frame: SimulationSnapshot | null; run: SimulationRun | null }) {
-  const speed = frame === null ? null : magnitude3(frame.rocket.velocityMps);
+function MetricStrip({ frame }: { frame: SimulationSnapshot | null }) {
+  const relativeSpeed = frame === null ? null : magnitude3(frame.rocket.velocityMps.map(
+    (velocity, index) => velocity - (frame.platform.velocityMps[index] ?? 0)
+  ));
   const halfSpacing = frame === null
     ? null
     : (frame.net.halfSpacingM[0] + frame.net.halfSpacingM[1]) / 2;
-  const load = frame === null
-    ? null
-    : run?.telemetry.findLast((sample) => sample.timeS <= frame.timeS)?.apparentLoadG ?? null;
+  const peakContactLoadKn = frame === null ? null : frame.metrics.peakContactForceN / 1_000;
 
   return (
     <div className="dashboard-metrics" aria-label="当前关键状态">
@@ -190,8 +195,8 @@ function MetricStrip({ frame, run }: { frame: SimulationSnapshot | null; run: Si
         <small>m</small>
       </div>
       <div className="dashboard-metric dashboard-metric--green">
-        <span>速度</span>
-        <strong>{formatMetric(speed, 1)}</strong>
+        <span>相对速度</span>
+        <strong>{formatMetric(relativeSpeed, 1)}</strong>
         <small>m/s</small>
       </div>
       <div className="dashboard-metric">
@@ -200,9 +205,9 @@ function MetricStrip({ frame, run }: { frame: SimulationSnapshot | null; run: Si
         <small>m</small>
       </div>
       <div className="dashboard-metric dashboard-metric--hot">
-        <span>表观载荷</span>
-        <strong>{formatMetric(load, 2)}</strong>
-        <small>g</small>
+        <span>峰值载荷</span>
+        <strong>{formatMetric(peakContactLoadKn, 0)}</strong>
+        <small>kN</small>
       </div>
     </div>
   );
@@ -260,12 +265,18 @@ export function Dashboard({
     <main className="recovery-dashboard">
       <header className="dashboard-header">
         <div className="dashboard-brand">
-          <h1>井字网系回收概念模拟器</h1>
-          <p>公开机理代理模型 v{run?.modelVersion ?? SIMULATION_MODEL_VERSION} · 运行 seed {displayedConfig.seed} · cfg {displayedFingerprint}</p>
+          <div className="dashboard-brand-title">
+            <h1>长征十号乙海上网系回收协同控制实验台</h1>
+            <span>v0.4</span>
+          </div>
+          <p>
+            公开信息约束下的候选算法代理模型 · 非官方实现
+            <small>模型 {run?.modelVersion ?? SIMULATION_MODEL_VERSION} · seed {displayedConfig.seed} · cfg {displayedFingerprint}</small>
+          </p>
           {dirty ? <span className="dirty-indicator">草稿 seed {config.seed} · cfg {draftFingerprint}，点击“重启”应用</span> : null}
         </div>
 
-        <MetricStrip frame={frame} run={run} />
+        <MetricStrip frame={frame} />
 
         <div className="dashboard-camera-actions" aria-label="三维视图控制">
           <button
@@ -301,6 +312,16 @@ export function Dashboard({
           <div className="panel-corner-label">
             t = <strong>{formatMetric(frame?.timeS ?? null, 2)}</strong> s
           </div>
+          {frame === null ? null : (
+            <div className="scene-status-overlay">
+              <strong>{frame.supervisorState}</strong>
+              <span>
+                {frame.capturePlan === null
+                  ? "等待有效捕获窗口"
+                  : `窗口 W-${String(frame.capturePlan.windowId).padStart(2, "0")} · 修订 R${frame.capturePlan.planRevision}`}
+              </span>
+            </div>
+          )}
           <Suspense fallback={<div className="panel-loading">正在装载三维视图…</div>}>
             <RecoveryScene
               frame={frame}
@@ -320,12 +341,22 @@ export function Dashboard({
             <span><i className="legend-dot legend-dot--truth" />真实状态</span>
             <span><i className="legend-line legend-line--estimate" />地面估计</span>
             <span><i className="legend-line legend-line--plan" />预测交会</span>
+            <span><i className="legend-area legend-area--uncertainty" />3σ 可达域</span>
           </div>
         </section>
 
-        <section className="charts-panel panel-shell" aria-label="实时遥测曲线">
+        <section
+          className={selectedInspectorTab === "algorithm"
+            ? "charts-panel charts-panel--algorithm panel-shell"
+            : "charts-panel panel-shell"}
+          aria-label={selectedInspectorTab === "algorithm" ? "控制算法工作台" : "实时遥测曲线"}
+        >
           <Suspense fallback={<div className="panel-loading">正在装载遥测图表…</div>}>
-            <TelemetryCharts run={run} currentTimeS={currentTimeS} />
+            {selectedInspectorTab === "algorithm" ? (
+              <AlgorithmWorkspace run={run} frame={frame} currentTimeS={currentTimeS} />
+            ) : (
+              <TelemetryCharts run={run} currentTimeS={currentTimeS} />
+            )}
           </Suspense>
         </section>
 
@@ -411,6 +442,8 @@ export function Dashboard({
         stateLabel={activeTask !== null ? "分析任务计算中" : dirty ? "参数待应用" : stateLabel}
         stateTone={activeTask !== null ? "active" : dirty ? "hot" : stateTone}
         canPlay={run !== null && !dirty}
+        physicsStepMs={displayedConfig.physicsDtS * 1_000}
+        seed={displayedConfig.seed}
         onTogglePlaying={onTogglePlaying}
         onReset={onReset}
         onStep={onStep}
@@ -440,7 +473,7 @@ export function Dashboard({
               <article><strong>可以用于</strong><p>验证通信—估计—控制—执行机构—接触动力学的闭环逻辑，比较候选算法在同一组有界扰动下的相对表现。</p></article>
               <article><strong>不能用于</strong><p>推断真实型号成功率、结构安全裕度、绞盘能力、制导律参数或工程验收结论。</p></article>
               <article><strong>参数来源</strong><p>界面将参数标为公开确认、公开估计、代理标定或研究假设；未公开参数不会伪装成官方数据。</p></article>
-              <article><strong>可重复性</strong><p>同一配置、算法版本和 seed 产生确定性一致结果；Monte Carlo 使用成对扰动比较三种算法。</p></article>
+              <article><strong>可重复性</strong><p>同一配置、算法版本和 seed 产生确定性一致结果；Monte Carlo 使用成对扰动比较四种算法。</p></article>
               <article><strong>状态隔离</strong><p>控制器只消费显式传感器采样、估计结果和虚拟链路投递消息；真实状态仅进入被控对象、指标和只读记录器。</p></article>
               <article><strong>结果解释</strong><p>捕获、稳定、断绳和中止均由显式判据产生，并通过事件、遥测、链路统计和最终指标留痕。</p></article>
             </div>

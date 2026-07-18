@@ -138,6 +138,7 @@ function DynamicActors({ frame, config }: { frame: SimulationSnapshot; config: S
   const rocketRef = useRef<THREE.Group>(null);
   const estimateRef = useRef<THREE.Group>(null);
   const planRef = useRef<THREE.Group>(null);
+  const uncertaintyRef = useRef<THREE.Group>(null);
   const netMaterialRef = useRef<THREE.LineBasicMaterial>(null);
 
   const ropeGeometry = useMemo(() => {
@@ -212,11 +213,13 @@ function DynamicActors({ frame, config }: { frame: SimulationSnapshot; config: S
       estimate[2] - platform.positionM[2],
       estimate[1] - platform.positionM[1]
     );
-    planRef.current?.position.set(
+    const planPosition: Point3 = [
       (snapshot.capturePlan?.predictedInterceptPositionM[0] ?? snapshot.net.centerM[0]) - platform.positionM[0],
       (snapshot.capturePlan?.predictedInterceptPositionM[2] ?? config.platform.capturePlaneZ) - platform.positionM[2],
       (snapshot.capturePlan?.predictedInterceptPositionM[1] ?? snapshot.net.centerM[1]) - platform.positionM[1]
-    );
+    ];
+    planRef.current?.position.set(...planPosition);
+    uncertaintyRef.current?.position.set(...planPosition);
 
     const width = config.platform.frameHalfWidthM;
     const depth = config.platform.frameHalfDepthM;
@@ -246,6 +249,14 @@ function DynamicActors({ frame, config }: { frame: SimulationSnapshot; config: S
 
     const plan = snapshot.capturePlan?.predictedInterceptPositionM;
     if (planRef.current !== null) planRef.current.visible = plan !== undefined;
+    if (uncertaintyRef.current !== null) {
+      uncertaintyRef.current.visible = plan !== undefined;
+      uncertaintyRef.current.scale.set(
+        Math.max(0.8, (snapshot.capturePlan?.predictionUncertaintyM[0] ?? 0) * 3),
+        Math.max(0.8, (snapshot.capturePlan?.predictionUncertaintyM[1] ?? 0) * 3),
+        1
+      );
+    }
     planLine.visible = plan !== undefined;
     const planPositions = planGeometry.getAttribute("position") as THREE.BufferAttribute;
     planPositions.set([
@@ -292,6 +303,23 @@ function DynamicActors({ frame, config }: { frame: SimulationSnapshot; config: S
           <meshBasicMaterial color="#ad8cff" transparent opacity={0.9} toneMapped={false} />
         </mesh>
       </group>
+      <group ref={uncertaintyRef} rotation={[-Math.PI / 2, 0, 0]}>
+        <mesh>
+          <circleGeometry args={[1, 64]} />
+          <meshBasicMaterial
+            color="#b77aff"
+            transparent
+            opacity={0.09}
+            depthWrite={false}
+            side={THREE.DoubleSide}
+            toneMapped={false}
+          />
+        </mesh>
+        <mesh position={[0, 0, 0.01]}>
+          <ringGeometry args={[0.985, 1, 64]} />
+          <meshBasicMaterial color="#b77aff" transparent opacity={0.72} toneMapped={false} />
+        </mesh>
+      </group>
       <primitive object={planLine} />
     </>
   );
@@ -328,7 +356,9 @@ function TrackingCamera({
       (rocketAltitude + config.platform.capturePlaneZ) * 0.5
     );
     const verticalSpan = Math.max(105, Math.abs(rocketAltitude - config.platform.capturePlaneZ) + 72);
-    const distance = Math.min(1_150, verticalSpan * 0.88);
+    // Keep the platform and the descending stage inside the 42° vertical field of view.
+    // The previous multiplier framed only about two thirds of their vertical span.
+    const distance = Math.min(1_250, verticalSpan * 1.34);
     target.set(snapshot.net.centerM[0], focusY, snapshot.net.centerM[1]);
     desiredPosition.set(distance * 0.68, focusY + distance * 0.2, distance * 0.76);
     const alpha = 1 - Math.exp(-delta * 2.8);
@@ -392,7 +422,7 @@ export function RecoveryScene(props: RecoverySceneProps) {
     <Canvas
       className="recovery-canvas"
       dpr={[1, 1.7]}
-      shadows
+      shadows="basic"
       gl={{ antialias: true, powerPreference: "high-performance" }}
       camera={{ position: [145, 118, 150], fov: 42, near: 0.1, far: 3_000 }}
     >

@@ -62,7 +62,7 @@ describe("multi-rate recovery simulation", () => {
     changedConfig.rocket.massKg += 1;
     const changed = runSimulation(changedConfig, { frameRateHz: 1 });
 
-    expect(baseline.modelVersion).toMatch(/^0\.3\./);
+    expect(baseline.modelVersion).toMatch(/^0\.4\./);
     expect(baseline.configFingerprint).toMatch(/^[0-9a-f]{8}$/);
     expect(changed.configFingerprint).not.toBe(baseline.configFingerprint);
     expect(baseline.finalSnapshot.runId).toContain(baseline.configFingerprint);

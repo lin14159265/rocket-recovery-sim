@@ -76,7 +76,7 @@ export function App() {
   const [busy, setBusy] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [selectedInspectorTab, setSelectedInspectorTab] = useState<InspectorTab>("scenario");
+  const [selectedInspectorTab, setSelectedInspectorTab] = useState<InspectorTab>("algorithm");
   const [monteCarloSummary, setMonteCarloSummary] = useState<MonteCarloSummary | null>(null);
   const [validationResult, setValidationResult] = useState<ValidationSuiteResult | null>(null);
   const [traceabilityResult, setTraceabilityResult] = useState<ParameterTraceabilityResult | null>(null);

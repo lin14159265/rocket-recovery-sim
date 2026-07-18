@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from "react";
-import { buildParameterTraceability } from "@recovery/sim-core";
+import { buildParameterTraceability, WINCH_IDS } from "@recovery/sim-core";
 import type {
   AlgorithmMode,
   NetworkStats,
@@ -16,7 +16,6 @@ import {
   AlertTriangle,
   Check,
   CircleGauge,
-  Cpu,
   LoaderCircle,
   Download,
   PlayCircle,
@@ -430,12 +429,38 @@ function CommunicationsInspector({
 }
 
 const ALGORITHMS: { id: AlgorithmMode; label: string; detail: string; cost: string }[] = [
-  { id: "fixed", label: "固定网", detail: "不追踪预测，作为开环基线", cost: "O(1) / tick" },
-  { id: "alpha-beta", label: "α-β 跟踪", detail: "常速度估计与误差反馈", cost: "O(1) / sample" },
-  { id: "predictive", label: "预测协同", detail: "状态估计、交会预测与收网同步", cost: "O(1) / control tick" }
+  { id: "fixed", label: "固定网", detail: "不追踪预测，作为开环基线", cost: "O(1)" },
+  { id: "alpha-beta", label: "α–β 基线", detail: "常速度估计与误差反馈", cost: "O(1)" },
+  { id: "predictive", label: "预测 PD", detail: "制导感知滚动预测与带限网中心 PD", cost: "O(N)" },
+  { id: "mpc", label: "约束 MPC", detail: "分层约束优化；异常时回退预测 PD", cost: "O(H×I)" }
 ];
 
 const SUPERVISOR_FLOW = ["SEARCH", "TRACK", "SYNC", "ARMED", "CLOSING", "CONTACT", "ARREST", "SECURED"];
+
+const WINCH_LABELS: Record<WinchNodeId, string> = {
+  "winch-x-negative": "W1",
+  "winch-x-positive": "W2",
+  "winch-y-negative": "W3",
+  "winch-y-positive": "W4"
+};
+
+const CONSTRAINT_LABELS: Record<string, string> = {
+  "rocket-trust-region": "火箭信赖域",
+  "rocket-lateral-acceleration": "横向加速度",
+  "net-trust-region": "网中心信赖域",
+  "winch-speed": "绞盘限速",
+  "net-center-travel": "网中心行程",
+  "closure-trust-region": "闭合率信赖域",
+  "half-spacing": "半间距"
+};
+
+const FALLBACK_LABELS: Record<string, string> = {
+  "": "无",
+  "stale-input": "输入过期",
+  "strength-proxy": "强度代理约束",
+  "non-finite": "结果非有限",
+  "not-converged": "未收敛"
+};
 
 function AlgorithmInspector({
   run,
@@ -457,14 +482,31 @@ function AlgorithmInspector({
     ? null
     : run?.telemetry.findLast((sample) => sample.timeS <= frame.timeS) ?? null;
   const maxTension = frame === null ? null : Math.max(...frame.net.tensionsN) / 1_000;
+  const selectedAlgorithm = ALGORITHMS.find((algorithm) => algorithm.id === config.controller.algorithm)
+    ?? ALGORITHMS[2]!;
+  const diagnostics = frame?.controlDiagnostics ?? null;
+  const mpc = diagnostics?.mpc ?? null;
+  const planVersion = frame?.capturePlan === null || frame?.capturePlan === undefined
+    ? "无有效窗口"
+    : `W-${String(frame.capturePlan.windowId).padStart(2, "0")} / R${frame.capturePlan.planRevision}`;
+  const gateHasCommitted = frame !== null
+    && ["ARMED", "CLOSING", "CONTACT", "ARREST", "SECURED"].includes(frame.supervisorState)
+    && (run?.events.some((entry) => entry.tick <= frame.tick && entry.type === "CAPTURE_READY") ?? false);
+  const vehicleReady = (diagnostics?.readiness.vehicle ?? false) || gateHasCommitted;
+  const winchReady = (nodeId: WinchNodeId): boolean =>
+    (diagnostics?.readiness.winches[nodeId] ?? false) || gateHasCommitted;
+  const readyCount = Number(vehicleReady) + WINCH_IDS.reduce(
+    (count, nodeId) => count + Number(winchReady(nodeId)),
+    0
+  );
 
   return (
     <div className="inspector-scroll">
       <section className="inspector-section">
         <div className="inspector-heading">
           <div>
-            <h2>候选控制策略</h2>
-            <p>三种模式使用同一物理内核，便于做闭环/基线对照。</p>
+            <h2>算法选择与复杂度</h2>
+            <p>四种模式共享物理内核、扰动与 seed，复杂度按单次调度表示。</p>
           </div>
         </div>
         <div className="algorithm-list">
@@ -476,11 +518,87 @@ function AlgorithmInspector({
               disabled={busy}
               onClick={() => onAlgorithmChange(algorithm.id)}
             >
-              <Cpu size={18} />
-              <span><strong>{algorithm.label}</strong><small>{algorithm.detail}</small></span>
+              <strong>{algorithm.label}</strong>
               <code>{algorithm.cost}</code>
             </button>
           ))}
+        </div>
+        <p className="algorithm-description">{selectedAlgorithm.detail}</p>
+      </section>
+
+      <section className="inspector-section inspector-section--compact">
+        <div className="inspector-heading">
+          <div>
+            <h2>MPC 求解健康度</h2>
+            <p>安全状态机独立于优化器；异常时回退预测 PD。</p>
+          </div>
+        </div>
+        {config.controller.algorithm !== "mpc" ? (
+          <div className="inline-empty">
+            <strong>当前未选择 MPC</strong>
+            <span>切换到“约束 MPC”后显示迭代、残差、约束和回退原因。</span>
+          </div>
+        ) : mpc === null ? (
+          <div className="inline-empty">
+            <strong>等待 MPC 计划窗口</strong>
+            <span>当前由预测 PD 与安全状态机保持闭环。</span>
+          </div>
+        ) : (
+          <>
+            <div className="solver-health-grid">
+              <div><span>迭代</span><strong>{mpc.iterations} / {config.controller.mpc.maximumIterations}</strong></div>
+              <div><span>求解状态</span><strong className={mpc.converged ? "is-good" : "is-warning"}>{mpc.converged ? "已收敛" : "未收敛"}</strong></div>
+              <div><span>目标函数</span><strong>{formatNumber(mpc.objective, 2)}</strong></div>
+              <div><span>最优性残差</span><strong>{formatNumber(mpc.optimalityResidual, 4)}</strong></div>
+              <div><span>预测峰值载荷</span><strong>{formatNumber(mpc.projectedPeakLoadN / 1_000, 0)} <small>kN</small></strong></div>
+              <div><span>累计回退</span><strong>{diagnostics?.mpcFallbackCount ?? 0}</strong></div>
+              <div><span>终端误差 基线</span><strong>{formatNumber(mpc.baselineTerminalErrorM, 2)} <small>m</small></strong></div>
+              <div><span>终端误差 优化后</span><strong>{formatNumber(mpc.optimizedTerminalErrorM, 2)} <small>m</small></strong></div>
+            </div>
+            <div className="constraint-row">
+              <span>激活约束</span>
+              <div>
+                {mpc.activeConstraints.length === 0
+                  ? <em>无</em>
+                  : mpc.activeConstraints.map((constraint) => (
+                    <strong key={constraint}>{CONSTRAINT_LABELS[constraint] ?? constraint}</strong>
+                  ))}
+              </div>
+            </div>
+            <div className="fallback-row">
+              <span>本次回退</span>
+              <strong className={mpc.fallbackReason === "" ? "is-good" : "is-warning"}>
+                {FALLBACK_LABELS[mpc.fallbackReason] ?? mpc.fallbackReason}
+              </strong>
+            </div>
+          </>
+        )}
+      </section>
+
+      <section className="inspector-section inspector-section--compact">
+        <div className="inspector-heading">
+          <div>
+            <h2>同版本 READY 门控</h2>
+            <p>{planVersion} · {gateHasCommitted
+              ? "五方同版本确认已锁定，当前状态不再重复握手。"
+              : "仅同一窗口与修订的五端确认允许 COMMIT。"}</p>
+          </div>
+          <strong className={readyCount === 5 ? "ready-count is-ready" : "ready-count"}>
+            {readyCount} / 5
+          </strong>
+        </div>
+        <div className="readiness-matrix" aria-label="火箭与四个绞盘就绪状态">
+          <div className={vehicleReady ? "is-ready" : ""}>
+            <i><Check size={12} /></i><strong>箭体</strong><span>{vehicleReady ? (gateHasCommitted ? "LOCK" : "READY") : "WAIT"}</span>
+          </div>
+          {WINCH_IDS.map((nodeId) => {
+            const ready = winchReady(nodeId);
+            return (
+              <div key={nodeId} className={ready ? "is-ready" : ""}>
+                <i><Check size={12} /></i><strong>{WINCH_LABELS[nodeId]}</strong><span>{ready ? (gateHasCommitted ? "LOCK" : "READY") : "WAIT"}</span>
+              </div>
+            );
+          })}
         </div>
       </section>
 
@@ -524,6 +642,34 @@ function AlgorithmInspector({
             <span>目标 / 当前总张力</span>
             <strong>{formatNumber(frame === null ? null : frame.net.targetTotalTensionN / 1_000, 0)} / {formatNumber(frame === null ? null : frame.net.tensionsN.reduce((sum, value) => sum + value, 0) / 1_000, 0)} kN</strong>
           </div>
+        </div>
+      </section>
+
+      <section className="inspector-section inspector-section--compact">
+        <div className="inspector-heading">
+          <div>
+            <h2>四绳张力环诊断</h2>
+            <p>实际 − 目标；主动阻尼是受限执行器状态。</p>
+          </div>
+        </div>
+        <div className="tension-loop-list">
+          {[0, 1, 2, 3].map((ropeIndex) => {
+            const desired = diagnostics?.desiredTensionsN[ropeIndex] ?? 0;
+            const actual = diagnostics?.actualTensionsN[ropeIndex] ?? 0;
+            const error = diagnostics?.tensionErrorsN[ropeIndex] ?? 0;
+            const errorPercent = Math.min(100, Math.abs(error) / Math.max(1, Math.abs(desired)) * 100);
+            const saturated = diagnostics?.tensionSaturated[ropeIndex] ?? false;
+            return (
+              <div key={ropeIndex} className={saturated ? "tension-loop-row is-saturated" : "tension-loop-row"}>
+                <strong>W{ropeIndex + 1}</strong>
+                <div className="tension-error-track"><i style={{ width: `${errorPercent}%` }} /></div>
+                <span>{formatNumber(desired / 1_000, 0)} / {formatNumber(actual / 1_000, 0)} kN</span>
+                <small>Δ {formatNumber(error / 1_000, 1)} kN</small>
+                <small>阻尼 {formatNumber((frame?.net.activeDampingNspm[ropeIndex] ?? 0) / 1_000, 1)} kN·s/m</small>
+                <em>{saturated ? "饱和" : "正常"}</em>
+              </div>
+            );
+          })}
         </div>
       </section>
 

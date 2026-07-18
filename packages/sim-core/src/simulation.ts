@@ -110,7 +110,7 @@ interface EstimatorLike {
   snapshot(): StateEstimate | null;
 }
 
-export const SIMULATION_MODEL_VERSION = "0.3.1";
+export const SIMULATION_MODEL_VERSION = "0.4.0";
 
 const MPC_ACTIVE_DAMPING_SCALE = 0.99;
 

@@ -9,6 +9,8 @@ export interface PlaybackBarProps {
   stateLabel: string;
   stateTone: "idle" | "active" | "hot" | "success" | "danger";
   canPlay: boolean;
+  physicsStepMs: number;
+  seed: number;
   onTogglePlaying: () => void;
   onReset: () => void;
   onStep: (direction: -1 | 1) => void;
@@ -27,6 +29,8 @@ export function PlaybackBar({
   stateLabel,
   stateTone,
   canPlay,
+  physicsStepMs,
+  seed,
   onTogglePlaying,
   onReset,
   onStep,
@@ -109,6 +113,14 @@ export function PlaybackBar({
           {SPEED_OPTIONS.map((option) => <option key={option} value={option}>{option}×</option>)}
         </select>
       </label>
+
+      <div className="determinism-readout" aria-label="确定性运行信息">
+        <span>固定步长</span>
+        <strong>{physicsStepMs.toFixed(0)} ms</strong>
+        <i aria-hidden="true" />
+        <span>seed</span>
+        <strong>{seed}</strong>
+      </div>
 
       <div className={`playback-status playback-status--${stateTone}`} role="status">
         <span>状态</span>
