@@ -4,7 +4,7 @@ import { runSimulation } from "../packages/sim-core/src/simulation";
 
 type Preset = Parameters<typeof createPresetScenario>[0];
 
-const algorithms = new Set<AlgorithmMode>(["fixed", "alpha-beta", "predictive"]);
+const algorithms = new Set<AlgorithmMode>(["fixed", "alpha-beta", "predictive", "mpc"]);
 const presets = new Set<Preset>([
   "nominal",
   "late-close",

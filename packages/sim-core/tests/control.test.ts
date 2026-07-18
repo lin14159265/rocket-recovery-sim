@@ -174,26 +174,41 @@ describe("capture coordinator", () => {
   const vehicle = (
     tick: number,
     ready: boolean,
-    verticalSpeed = -2
+    verticalSpeed = -2,
+    planRevision = 1
   ): CaptureVehicleObservation => ({
     estimate: estimate(tick, [1, -1, Math.max(0, 4 + verticalSpeed * tick * 0.1)], [0, 0, verticalSpeed]),
     attitudeWxyz: [1, 0, 0, 0],
+    angularVelocityRadps: [0, 0, 0],
     rocketMode: ready ? "CAPTURE_READY" : "TERMINAL",
     captureReady: ready,
+    acknowledgedWindowId: ready ? 1 : null,
+    acknowledgedPlanRevision: ready ? planRevision : null,
     healthFlags: 0
   });
   const net = (overrides: Partial<NetControlFeedback> = {}): NetControlFeedback => ({
     centerM: [0, 0],
+    centerVelocityMps: [0, 0],
     halfSpacingM: [6, 6],
+    halfSpacingRateMps: [0, 0],
     winchesReady: true,
+    winchStatuses: {
+      "winch-x-negative": { positionM: -6, velocityMps: 0, tensionN: 0, stuck: false, readyWindowId: 1, readyPlanRevision: 1, ready: true, estimatedArrivalTick: 0, readinessReason: "ready" },
+      "winch-x-positive": { positionM: 6, velocityMps: 0, tensionN: 0, stuck: false, readyWindowId: 1, readyPlanRevision: 1, ready: true, estimatedArrivalTick: 0, readinessReason: "ready" },
+      "winch-y-negative": { positionM: -6, velocityMps: 0, tensionN: 0, stuck: false, readyWindowId: 1, readyPlanRevision: 1, ready: true, estimatedArrivalTick: 0, readinessReason: "ready" },
+      "winch-y-positive": { positionM: 6, velocityMps: 0, tensionN: 0, stuck: false, readyWindowId: 1, readyPlanRevision: 1, ready: true, estimatedArrivalTick: 0, readinessReason: "ready" }
+    },
     anyWinchStuck: false,
     contactDetected: false,
     broken: false,
     secured: false,
+    tensionsN: [0, 0, 0, 0],
+    payoutM: 0,
+    payoutVelocityMps: 0,
     ...overrides
   });
 
-  const makeCoordinator = (): CaptureCoordinator => {
+  const makeCoordinator = (netCenterGains?: [number, number]): CaptureCoordinator => {
     const scenario = createNominalScenario();
     scenario.net.openHalfSpacingM = 6;
     scenario.net.closedHalfSpacingM = 3;
@@ -201,10 +216,19 @@ describe("capture coordinator", () => {
     scenario.net.winchMaxSpeedMps = 10;
     scenario.net.winchMaxAccelerationMps2 = 20;
     scenario.controller.staleTelemetryAbortS = 0.8;
+    scenario.controller.guidance.captureDescentSpeedMps = 0.5;
+    scenario.controller.guidance.maximumDescentSpeedMps = 3;
+    scenario.controller.guidance.brakingAccelerationMps2 = 0.5;
+    if (netCenterGains !== undefined) {
+      scenario.controller.netCenterKp = netCenterGains[0];
+      scenario.controller.netCenterKd = netCenterGains[1];
+    }
     return new CaptureCoordinator({
       tickDurationS: 0.1,
       controller: scenario.controller,
       net: scenario.net,
+      rocket: scenario.rocket,
+      gravityMps2: scenario.environment.gravityMps2,
       capturePlaneZ: 0,
       stableTrackSamples: 1,
       prepareLeadTimeS: 3,
@@ -218,12 +242,24 @@ describe("capture coordinator", () => {
     tick: number,
     ready: boolean,
     netFeedback = net(),
-    verticalSpeed = -2
+    verticalSpeed = -2,
+    planRevision = 1
   ) => coordinator.step({
     tick,
-    vehicleState: vehicle(tick, ready, verticalSpeed),
+    vehicleState: vehicle(tick, ready, verticalSpeed, planRevision),
+    groundVehicleEstimate: vehicle(tick, ready, verticalSpeed).estimate,
     platformEstimate: platform(tick),
-    net: netFeedback
+    net: ready
+      ? {
+          ...netFeedback,
+          winchStatuses: Object.fromEntries(Object.entries(netFeedback.winchStatuses).map(
+            ([node, status]) => [
+              node,
+              status === null ? null : { ...status, readyPlanRevision: planRevision }
+            ]
+          )) as NetControlFeedback["winchStatuses"]
+        }
+      : netFeedback
   });
 
   it("has exact minimum-jerk endpoints", () => {
@@ -242,6 +278,20 @@ describe("capture coordinator", () => {
     });
   });
 
+  it("uses netCenterKp/Kd in the outer net-centre response", () => {
+    const disabled = makeCoordinator([0, 0]);
+    const enabled = makeCoordinator([2.4, 1.4]);
+    step(disabled, 0, false);
+    step(enabled, 0, false);
+    step(disabled, 1, false);
+    step(enabled, 1, false);
+    const disabledResponse = step(disabled, 2, false);
+    const enabledResponse = step(enabled, 2, false);
+    expect(enabledResponse.desiredNetCenterM).not.toEqual(disabledResponse.desiredNetCenterM);
+    expect(Math.hypot(...enabledResponse.desiredNetCenterM))
+      .toBeGreaterThan(Math.hypot(...disabledResponse.desiredNetCenterM));
+  });
+
   it("requires PREPARE readiness before COMMIT and changes to tension after contact", () => {
     const coordinator = makeCoordinator();
     expect(step(coordinator, 0, false).state).toBe("SEARCH");
@@ -256,8 +306,9 @@ describe("capture coordinator", () => {
     expect(waiting.handshakePhase).toBe("PREPARE");
 
     let committed = waiting;
-    for (let tick = 4; tick <= 10; tick += 1) {
-      committed = step(coordinator, tick, tick >= 8);
+    for (let tick = 4; tick <= 30; tick += 1) {
+      const acknowledgedRevision = committed.plan?.planRevision ?? 1;
+      committed = step(coordinator, tick, tick >= 8, net(), -2, acknowledgedRevision);
       if (committed.state === "ARMED") break;
     }
     expect(committed.state).toBe("ARMED");
@@ -290,6 +341,7 @@ describe("capture coordinator", () => {
     const input = (tick: number): CaptureCoordinatorInput => ({
       tick,
       vehicleState: fastVehicle(tick),
+      groundVehicleEstimate: fastVehicle(tick).estimate,
       platformEstimate: platform(tick),
       net: net({ winchesReady: false })
     });
@@ -297,10 +349,36 @@ describe("capture coordinator", () => {
     expect(coordinator.step(input(0)).state).toBe("SEARCH");
     expect(coordinator.step(input(1)).state).toBe("TRACK");
     expect(coordinator.step(input(2)).handshakePhase).toBe("PREPARE");
-    const aborted = coordinator.step(input(3));
+    const deadlineTick = coordinator.step(input(3)).plan?.commitDeadlineTick ?? 3;
+    const aborted = coordinator.step(input(deadlineTick + 1));
     expect(aborted.state).toBe("ABORT");
     expect(aborted.abortReason).toMatch(/PREPARE timed out/);
     expect(aborted.handshakePhase).toBe("ABORT");
+  });
+
+  it("does not COMMIT on a stale revision or a single unready winch", () => {
+    const coordinator = makeCoordinator();
+    step(coordinator, 0, false);
+    step(coordinator, 1, false);
+    const prepared = step(coordinator, 2, false);
+    const revision = prepared.plan?.planRevision ?? 1;
+
+    const stale = step(coordinator, 3, true, net(), -2, revision - 1);
+    expect(stale.state).toBe("SYNC");
+    expect(stale.readiness.all).toBe(false);
+
+    const partialNet = net();
+    const xNegative = partialNet.winchStatuses["winch-x-negative"];
+    if (xNegative !== null) {
+      partialNet.winchStatuses["winch-x-negative"] = {
+        ...xNegative,
+        ready: false,
+        readinessReason: "actuator-unavailable"
+      };
+    }
+    const partial = step(coordinator, 4, true, partialNet, -2, revision);
+    expect(partial.state).toBe("SYNC");
+    expect(partial.readiness.winches["winch-x-negative"]).toBe(false);
   });
 
   it("aborts a live window when vehicle telemetry becomes stale", () => {
@@ -311,6 +389,7 @@ describe("capture coordinator", () => {
     let result = coordinator.step({
       tick: 2,
       vehicleState: staleVehicle,
+      groundVehicleEstimate: staleVehicle.estimate,
       platformEstimate: platform(2),
       net: net()
     });
@@ -318,6 +397,7 @@ describe("capture coordinator", () => {
       result = coordinator.step({
         tick,
         vehicleState: null,
+        groundVehicleEstimate: staleVehicle.estimate,
         platformEstimate: platform(tick),
         net: net()
       });

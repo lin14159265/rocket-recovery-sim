@@ -6,6 +6,7 @@ import {
   createNeutralPlantInput,
   type PlantStepInput
 } from "../src/plant";
+import { WinchTensionController } from "../src/control";
 
 const makeForceFreeScenario = () => {
   const config = createNominalScenario();
@@ -36,6 +37,12 @@ const makeClosedNetInput = (config: ReturnType<typeof createNominalScenario>): P
       config.net.closedHalfSpacingM
     ],
     targetTotalTensionN: 0,
+    desiredTensionsN: [0, 0, 0, 0],
+    desiredActiveDampingNspm: Array(4).fill(Math.min(
+      config.net.activeDampingMaxNspm,
+      Math.max(config.net.activeDampingMinNspm, config.net.totalDampingNspm / 4)
+    )) as [number, number, number, number],
+    tensionControllerSaturated: [false, false, false, false],
     requestedMode: "closing"
   }
 });
@@ -51,6 +58,9 @@ const makeEquilibriumCaptureScenario = () => {
   config.net.closedHalfSpacingM = 3;
   config.net.totalStiffnessNpm = 1_000_000;
   config.net.totalDampingNspm = 10_000;
+  config.net.activeDampingMinNspm = 0;
+  config.net.activeDampingMaxNspm = 100_000;
+  config.net.activeDampingRateNspmPerS = 10_000_000;
   config.net.lateralStiffnessNpm = 2_000;
   config.net.lateralDampingNspm = 1_000;
   config.net.totalStrengthLimitN = 1_000_000;
@@ -223,8 +233,8 @@ describe("RecoveryPlant winches and capture mechanics", () => {
     plant.step(input);
 
     const result = plant.step(input);
-    const expectedVerticalForceN =
-      config.net.totalStiffnessNpm * 0.001 + config.net.totalDampingNspm * 1.1;
+    const expectedVerticalForceN = config.net.totalStiffnessNpm * 0.001 +
+      result.net.activeDampingNspm.reduce((sum, value) => sum + value, 0) * 1.1;
     expect(result.net.totalContactForceN[2]).toBeCloseTo(expectedVerticalForceN, 7);
     expect(result.net.totalContactForceN[0]).toBeCloseTo(
       -config.net.lateralStiffnessNpm * 0.05,
@@ -270,5 +280,52 @@ describe("RecoveryPlant winches and capture mechanics", () => {
       7
     );
     expect(result.rocket.velocityMps[2]).toBeCloseTo(0, 7);
+  });
+
+  it("turns a higher tension demand into active damping, contact force, and shorter payout", () => {
+    const config = makeEquilibriumCaptureScenario();
+    config.net.activeDampingMinNspm = 0;
+    config.net.activeDampingMaxNspm = 100_000;
+    config.net.activeDampingRateNspmPerS = 10_000_000;
+    config.net.totalStrengthLimitN = 10_000_000;
+    config.net.arrestDistanceM = 10;
+    const lowPlant = new RecoveryPlant(config);
+    const highPlant = new RecoveryPlant(config);
+    const lowInput = makeClosedNetInput(config);
+    const highInput = makeClosedNetInput(config);
+    const lowController = new WinchTensionController(config.controller.tension, config.net);
+    const highController = new WinchTensionController(config.controller.tension, config.net);
+    const low = lowController.update(0, 0, 0.01);
+    const high = highController.update(100_000, 0, 0.01);
+    lowInput.netCommand.desiredActiveDampingNspm = [
+      low.desiredDampingNspm, low.desiredDampingNspm,
+      low.desiredDampingNspm, low.desiredDampingNspm
+    ];
+    highInput.netCommand.desiredActiveDampingNspm = [
+      high.desiredDampingNspm, high.desiredDampingNspm,
+      high.desiredDampingNspm, high.desiredDampingNspm
+    ];
+    lowInput.netCommand.desiredTensionsN = [0, 0, 0, 0];
+    highInput.netCommand.desiredTensionsN = [100_000, 100_000, 100_000, 100_000];
+
+    lowPlant.step(lowInput);
+    highPlant.step(highInput);
+    let lowResult = lowPlant.step(lowInput);
+    let highResult = highPlant.step(highInput);
+    expect(highResult.net.activeDampingNspm[0]).toBeGreaterThan(
+      lowResult.net.activeDampingNspm[0]
+    );
+    expect(highResult.net.totalContactForceN[2]).toBeGreaterThan(
+      lowResult.net.totalContactForceN[2]
+    );
+    let maximumLowPayoutM = lowResult.net.payoutM;
+    let maximumHighPayoutM = highResult.net.payoutM;
+    for (let index = 0; index < 100; index += 1) {
+      lowResult = lowPlant.step(lowInput);
+      highResult = highPlant.step(highInput);
+      maximumLowPayoutM = Math.max(maximumLowPayoutM, lowResult.net.payoutM);
+      maximumHighPayoutM = Math.max(maximumHighPayoutM, highResult.net.payoutM);
+    }
+    expect(maximumHighPayoutM).toBeLessThan(maximumLowPayoutM);
   });
 });

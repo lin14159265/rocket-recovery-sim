@@ -53,6 +53,9 @@ const makeNet = (): NetTruthState => {
     payoutM: 0,
     payoutVelocityMps: 0,
     targetTotalTensionN: 0,
+    desiredTensionsN: [0, 0, 0, 0],
+    activeDampingNspm: [26_250, 26_250, 26_250, 26_250],
+    tensionControllerSaturated: [false, false, false, false],
     mode: "closing"
   };
 };

@@ -7,6 +7,7 @@ export * from "./comms/network";
 export * from "./sensors";
 export * from "./estimation";
 export * from "./control";
+export * from "./mpc";
 export * from "./plant";
 export * from "./metrics";
 export * from "./simulation";

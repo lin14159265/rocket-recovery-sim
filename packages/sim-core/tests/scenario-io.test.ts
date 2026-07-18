@@ -20,7 +20,7 @@ describe("scenario document migration", () => {
     delete legacy.faults;
     const result = migrateScenarioDocument(legacy);
     expect(result.migrated).toBe(true);
-    expect(result.config.schemaVersion).toBe(2);
+    expect(result.config.schemaVersion).toBe(3);
     expect(result.config.faults.radioBlackout.enabled).toBe(false);
     expect(result.warnings.length).toBeGreaterThan(0);
   });
@@ -62,9 +62,9 @@ describe("scenario document migration", () => {
     };
     const result = migrateScenarioDocument(legacyEnvelope);
     expect(result.sourceDocumentVersion).toBe(1);
-    expect(result.targetDocumentVersion).toBe(2);
+    expect(result.targetDocumentVersion).toBe(3);
     expect(result.migrated).toBe(true);
-    expect(result.warnings.join(" ")).toMatch(/documentVersion 2/);
+    expect(result.warnings.join(" ")).toMatch(/documentVersion 3/);
   });
 
   it("rejects a future document version", () => {
@@ -75,7 +75,7 @@ describe("scenario document migration", () => {
     expect(() => migrateScenarioDocument(document)).toThrow(/documentVersion=99/);
   });
 
-  it("rejects a current v2 document with missing required fields", () => {
+  it("rejects a current v3 document with missing required fields", () => {
     const document = createScenarioDocument(createNominalScenario()) as unknown as {
       config: { rocket: Record<string, unknown> };
     };
@@ -99,7 +99,7 @@ describe("scenario document migration", () => {
     expect(() => migrateScenarioDocument(rateDocument)).toThrow(/整除物理 tick 频率/);
   });
 
-  it("verifies the fingerprint of current v2 envelopes", () => {
+  it("verifies the fingerprint of current v3 envelopes", () => {
     const document = createScenarioDocument(createNominalScenario());
     document.config.rocket.massKg += 1;
     expect(() => migrateScenarioDocument(document)).toThrow(/configFingerprint 不匹配/);

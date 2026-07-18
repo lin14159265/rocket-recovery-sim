@@ -62,7 +62,7 @@ describe("multi-rate recovery simulation", () => {
     changedConfig.rocket.massKg += 1;
     const changed = runSimulation(changedConfig, { frameRateHz: 1 });
 
-    expect(baseline.modelVersion).toMatch(/^0\.3\./);
+    expect(baseline.modelVersion).toMatch(/^0\.4\./);
     expect(baseline.configFingerprint).toMatch(/^[0-9a-f]{8}$/);
     expect(changed.configFingerprint).not.toBe(baseline.configFingerprint);
     expect(baseline.finalSnapshot.runId).toContain(baseline.configFingerprint);
@@ -114,6 +114,20 @@ describe("multi-rate recovery simulation", () => {
       "FAULT_CLEARED"
     ]);
     expect(faultEvents[0]?.message).toMatch(/导航偏置阶跃/);
+  });
+
+  it("is bit-repeatable in MPC mode including iterations and fallback reasons", () => {
+    const config = createNominalScenario();
+    config.controller.algorithm = "mpc";
+    const first = runSimulation(config, { frameRateHz: 1, stopOnTerminal: true });
+    const second = runSimulation(config, { frameRateHz: 1, stopOnTerminal: true });
+
+    expect(second.metrics).toEqual(first.metrics);
+    expect(second.events).toEqual(first.events);
+    expect(second.telemetry).toEqual(first.telemetry);
+    expect(second.metrics.mpcFallbackReasons).toEqual(first.metrics.mpcFallbackReasons);
+    expect(second.telemetry.map((sample) => sample.mpcIterations))
+      .toEqual(first.telemetry.map((sample) => sample.mpcIterations));
   });
 
 });

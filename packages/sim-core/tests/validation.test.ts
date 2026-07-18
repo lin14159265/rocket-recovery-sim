@@ -48,13 +48,16 @@ describe("model validation utilities", () => {
 
   it("marks terminal mode changes instead of fabricating a continuous sensitivity coefficient", () => {
     const config = createNominalScenario();
+    // Place the research strength proxy close to the nominal peak so the
+    // lower 5% perturbation crosses a real categorical boundary.
+    config.net.totalStrengthLimitN = 850_000;
     const result = runLocalSensitivity(config);
-    const velocity = result.rows.find((row) => row.path === "rocket.initialVelocityMps.2");
-    expect(velocity).toBeDefined();
-    expect(velocity?.modeTransition).toBe(true);
-    expect(velocity?.sensitivityScore).toBeNull();
-    expect(velocity?.dominantEffect).toBe("终态模式切换");
-  }, 40_000);
+    const strength = result.rows.find((row) => row.path === "net.totalStrengthLimitN");
+    expect(strength).toBeDefined();
+    expect(strength?.modeTransition).toBe(true);
+    expect(strength?.sensitivityScore).toBeNull();
+    expect(strength?.dominantEffect).toBe("终态模式切换");
+  }, 90_000);
 
   it("uses an explicit absolute floor for a zero-valued probability", () => {
     const config = createNominalScenario();

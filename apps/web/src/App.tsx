@@ -33,6 +33,7 @@ type WithoutRequestId<T> = T extends unknown ? Omit<T, "requestId"> : never;
 const algorithmLabel = (algorithm: AlgorithmMode): string => {
   if (algorithm === "fixed") return "固定网";
   if (algorithm === "alpha-beta") return "α–β 协同";
+  if (algorithm === "mpc") return "约束 MPC";
   return "预测协同";
 };
 
@@ -75,7 +76,7 @@ export function App() {
   const [busy, setBusy] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [selectedInspectorTab, setSelectedInspectorTab] = useState<InspectorTab>("scenario");
+  const [selectedInspectorTab, setSelectedInspectorTab] = useState<InspectorTab>("algorithm");
   const [monteCarloSummary, setMonteCarloSummary] = useState<MonteCarloSummary | null>(null);
   const [validationResult, setValidationResult] = useState<ValidationSuiteResult | null>(null);
   const [traceabilityResult, setTraceabilityResult] = useState<ParameterTraceabilityResult | null>(null);

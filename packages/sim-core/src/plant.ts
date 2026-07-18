@@ -39,8 +39,13 @@ export type PreContactNetMode = Extract<CaptureMode, "open" | "tracking" | "clos
 export interface PlantNetCommand {
   /** Absolute positions in platform coordinates, ordered per {@link WINCH_AXIS_ORDER}. */
   desiredAxisPositionsM: WinchAxisValues<number>;
-  /** Recorded tension demand from the net controller; the plant does not apply it as an ideal force. */
+  /** Total demand retained for supervisory diagnostics. */
   targetTotalTensionN: number;
+  /** Per-rope demand tracked by the local tension loops. */
+  desiredTensionsN: WinchAxisValues<number>;
+  /** Per-rope active damping commands; the plant rate-limits these actuator states. */
+  desiredActiveDampingNspm: WinchAxisValues<number>;
+  tensionControllerSaturated: WinchAxisValues<boolean>;
   requestedMode: PreContactNetMode;
 }
 
@@ -207,7 +212,10 @@ const cloneNet = (net: NetTruthState): NetTruthState => ({
   centerM: [...net.centerM],
   halfSpacingM: [...net.halfSpacingM],
   tensionsN: [...net.tensionsN],
-  totalContactForceN: [...net.totalContactForceN]
+  totalContactForceN: [...net.totalContactForceN],
+  desiredTensionsN: [...net.desiredTensionsN],
+  activeDampingNspm: [...net.activeDampingNspm],
+  tensionControllerSaturated: [...net.tensionControllerSaturated]
 });
 
 const cloneCapture = (capture: CaptureEvaluation): CaptureEvaluation => ({
@@ -336,6 +344,11 @@ export class RecoveryPlant {
     this.platform = this.evaluatePlatform(0);
 
     const spacing = config.net.openHalfSpacingM;
+    const passivePerRopeDamping = clamp(
+      config.net.totalDampingNspm / 4,
+      config.net.activeDampingMinNspm,
+      config.net.activeDampingMaxNspm
+    );
     this.net = {
       xNegative: makeAxis(-spacing),
       xPositive: makeAxis(spacing),
@@ -348,6 +361,14 @@ export class RecoveryPlant {
       payoutM: 0,
       payoutVelocityMps: 0,
       targetTotalTensionN: 0,
+      desiredTensionsN: [0, 0, 0, 0],
+      activeDampingNspm: [
+        passivePerRopeDamping,
+        passivePerRopeDamping,
+        passivePerRopeDamping,
+        passivePerRopeDamping
+      ],
+      tensionControllerSaturated: [false, false, false, false],
       mode: "open"
     };
 
@@ -515,8 +536,12 @@ export class RecoveryPlant {
     const relativeContactWorkExtractedJ = contactActive
       ? -dot3(contact.forceLocalN, averageLocalVelocityMps) * dtS
       : 0;
+    const activeVerticalDampingNspm = this.net.activeDampingNspm.reduce(
+      (sum, value) => sum + value,
+      0
+    );
     const verticalDampingJ = contact.forceLocalN[2] > 0
-      ? this.config.net.totalDampingNspm * contact.payoutVelocityMps ** 2 * dtS
+      ? activeVerticalDampingNspm * contact.payoutVelocityMps ** 2 * dtS
       : 0;
     const lateralDampingJ = contactActive
       ? this.config.net.lateralDampingNspm * (
@@ -551,6 +576,8 @@ export class RecoveryPlant {
 
   private validateInput(input: PlantStepInput): void {
     finiteVector("desiredAxisPositionsM", input.netCommand.desiredAxisPositionsM);
+    finiteVector("desiredTensionsN", input.netCommand.desiredTensionsN);
+    finiteVector("desiredActiveDampingNspm", input.netCommand.desiredActiveDampingNspm);
     finiteVector("desiredTorqueNm", input.rocketControl.desiredTorqueNm);
     finiteVector("desiredAccelerationMps2", input.rocketControl.desiredAccelerationMps2);
     finiteVector("desiredAttitudeWxyz", input.rocketControl.desiredAttitudeWxyz);
@@ -656,6 +683,25 @@ export class RecoveryPlant {
       Math.max(0, (this.net.yPositive.positionM - this.net.yNegative.positionM) / 2)
     ];
     this.net.targetTotalTensionN = Math.max(0, input.netCommand.targetTotalTensionN);
+    this.net.desiredTensionsN = input.netCommand.desiredTensionsN.map(
+      (value) => Math.max(0, value)
+    ) as WinchAxisValues<number>;
+    const maximumDampingStep = this.config.net.activeDampingRateNspmPerS * dtS;
+    for (let index = 0; index < this.net.activeDampingNspm.length; index += 1) {
+      const current = this.net.activeDampingNspm[index] ?? 0;
+      const target = clamp(
+        input.netCommand.desiredActiveDampingNspm[index] ?? current,
+        this.config.net.activeDampingMinNspm,
+        this.config.net.activeDampingMaxNspm
+      );
+      this.net.activeDampingNspm[index] = current + clamp(
+        target - current,
+        -maximumDampingStep,
+        maximumDampingStep
+      );
+      this.net.tensionControllerSaturated[index] =
+        input.netCommand.tensionControllerSaturated[index] ?? false;
+    }
   }
 
   private updateAxis(axis: AxisActuatorState, desiredPositionM: number, dtS: number): void {
@@ -835,7 +881,7 @@ export class RecoveryPlant {
     const verticalForceN = Math.max(
       0,
       this.config.net.totalStiffnessNpm * payoutM +
-        this.config.net.totalDampingNspm * payoutVelocityMps
+        this.net.activeDampingNspm.reduce((sum, value) => sum + value, 0) * payoutVelocityMps
     );
 
     const lateralOffsetM: [number, number] = [
@@ -1085,6 +1131,14 @@ export const createNeutralPlantInput = (config: ScenarioConfig): PlantStepInput 
       config.net.openHalfSpacingM
     ],
     targetTotalTensionN: 0,
+    desiredTensionsN: [0, 0, 0, 0],
+    desiredActiveDampingNspm: [
+      config.net.activeDampingMinNspm,
+      config.net.activeDampingMinNspm,
+      config.net.activeDampingMinNspm,
+      config.net.activeDampingMinNspm
+    ],
+    tensionControllerSaturated: [false, false, false, false],
     requestedMode: "open"
   }
 });

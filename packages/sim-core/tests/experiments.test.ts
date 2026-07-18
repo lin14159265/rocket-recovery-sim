@@ -86,6 +86,10 @@ describe("paired algorithm experiments", () => {
       expect(variant.captureRate).toBe(variant.captures / variant.runs);
       expect(Object.values(variant.failureReasons).reduce((sum, count) => sum + count, 0))
         .toBe(variant.runs - variant.secured);
+      expect(Object.values(variant.mpcFallbackReasons).every((count) => count >= 0)).toBe(true);
+      expect(variant.mpcFallbackCount).toBe(
+        Object.values(variant.mpcFallbackReasons).reduce((sum, count) => sum + count, 0)
+      );
     }
   });
 });

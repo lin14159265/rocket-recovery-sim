@@ -27,6 +27,7 @@ const metres = (value: number | null): string => value === null ? "无穿越" : 
 const algorithmName = (algorithm: AlgorithmExperimentSummary["algorithm"]): string => {
   if (algorithm === "fixed") return "固定网";
   if (algorithm === "alpha-beta") return "α–β 协同";
+  if (algorithm === "mpc") return "约束 MPC";
   return "预测协同";
 };
 
@@ -48,6 +49,7 @@ if (process.argv.includes("--help")) {
     捕获: variant.captures,
     稳定: variant.secured,
     捕获率: percent(variant.captureRate),
+    稳定率: percent(variant.securedRate),
     "峰值均值(kN)": (variant.meanPeakLoadN / 1_000).toFixed(1),
     "峰值p95(kN)": (variant.p95PeakLoadN / 1_000).toFixed(1),
     "平均脱靶(m)": metres(variant.meanMissDistanceM)
@@ -59,5 +61,12 @@ if (process.argv.includes("--help")) {
       ? "无"
       : reasons.map(([reason, count]) => `${reason} × ${count}`).join("；");
     console.log(`${algorithmName(variant.algorithm)}失败/未稳定原因：${detail}`);
+    if (variant.algorithm === "mpc") {
+      const fallbackDetail = Object.entries(variant.mpcFallbackReasons)
+        .filter(([, count]) => count > 0)
+        .map(([reason, count]) => `${reason} × ${count}`)
+        .join("；");
+      console.log(`约束 MPC 回退：总计 ${variant.mpcFallbackCount}；${fallbackDetail || "无"}`);
+    }
   }
 }
