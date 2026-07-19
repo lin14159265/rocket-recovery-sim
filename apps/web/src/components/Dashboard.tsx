@@ -17,6 +17,7 @@ import {
   Camera,
   CameraOff,
   FlaskConical,
+  Gauge,
   ListChecks,
   Radio,
   RotateCcw,
@@ -25,6 +26,14 @@ import {
 import { displayedConfigFor } from "../app-state";
 import { Inspector } from "./Inspector";
 import { PlaybackBar } from "./PlaybackBar";
+import {
+  chooseInitialAutoQuality,
+  readSceneQualityPreference,
+  resolveSceneQuality,
+  writeSceneQualityPreference,
+  type ResolvedSceneQuality,
+  type SceneQualityPreference
+} from "./scene/scene-quality";
 import "../dashboard.css";
 
 const RecoveryScene = lazy(async () => {
@@ -178,6 +187,37 @@ const stateToneForFrame = (
   return "active";
 };
 
+const qualityLabel: Record<SceneQualityPreference | ResolvedSceneQuality, string> = {
+  auto: "自动",
+  high: "高",
+  medium: "中",
+  low: "低"
+};
+
+const detectInitialAutoQuality = (): ResolvedSceneQuality => {
+  if (typeof window === "undefined" || typeof document === "undefined") return "low";
+  let webgl2 = false;
+  try {
+    const canvas = document.createElement("canvas");
+    const context = canvas.getContext("webgl2", {
+      failIfMajorPerformanceCaveat: true
+    });
+    webgl2 = context !== null;
+    context?.getExtension("WEBGL_lose_context")?.loseContext();
+  } catch {
+    webgl2 = false;
+  }
+  const navigatorWithMemory = navigator as Navigator & { deviceMemory?: number };
+  return chooseInitialAutoQuality({
+    reducedMotion: window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+    webgl2,
+    ...(navigatorWithMemory.deviceMemory === undefined
+      ? {}
+      : { deviceMemoryGb: navigatorWithMemory.deviceMemory }),
+    hardwareConcurrency: navigator.hardwareConcurrency
+  });
+};
+
 function MetricStrip({ frame }: { frame: SimulationSnapshot | null }) {
   const relativeSpeed = frame === null ? null : magnitude3(frame.rocket.velocityMps.map(
     (velocity, index) => velocity - (frame.platform.velocityMps[index] ?? 0)
@@ -252,6 +292,11 @@ export function Dashboard({
   const [cameraFollow, setCameraFollow] = useState(true);
   const [cameraResetToken, setCameraResetToken] = useState(0);
   const [boundaryOpen, setBoundaryOpen] = useState(false);
+  const [qualityPreference, setQualityPreference] = useState<SceneQualityPreference>(() =>
+    readSceneQualityPreference(typeof window === "undefined" ? null : window.localStorage)
+  );
+  const [automaticQuality, setAutomaticQuality] = useState<ResolvedSceneQuality>(detectInitialAutoQuality);
+  const resolvedQuality = resolveSceneQuality(qualityPreference, automaticQuality);
   const durationS = run?.config.durationS ?? config.durationS;
   const displayedConfig = displayedConfigFor(run, config);
   const displayedFingerprint = run?.configFingerprint ?? fingerprintScenarioConfig(displayedConfig);
@@ -267,7 +312,7 @@ export function Dashboard({
         <div className="dashboard-brand">
           <div className="dashboard-brand-title">
             <h1>长征十号乙海上网系回收协同控制实验台</h1>
-            <span>v0.4</span>
+            <span>v0.5.0</span>
           </div>
           <p>
             公开信息约束下的候选算法代理模型 · 非官方实现
@@ -279,6 +324,24 @@ export function Dashboard({
         <MetricStrip frame={frame} />
 
         <div className="dashboard-camera-actions" aria-label="三维视图控制">
+          <label className="scene-quality-control" title="三维显示画质，不写入场景配置或结果指纹">
+            <Gauge size={16} aria-hidden="true" />
+            <span>画质</span>
+            <select
+              aria-label="三维画质"
+              value={qualityPreference}
+              onChange={(event) => {
+                const next = event.target.value as SceneQualityPreference;
+                setQualityPreference(next);
+                writeSceneQualityPreference(window.localStorage, next);
+              }}
+            >
+              <option value="auto">自动</option>
+              <option value="high">高</option>
+              <option value="medium">中</option>
+              <option value="low">低</option>
+            </select>
+          </label>
           <button
             className={cameraFollow ? "tool-button is-active" : "tool-button"}
             type="button"
@@ -320,6 +383,9 @@ export function Dashboard({
                   ? "等待有效捕获窗口"
                   : `窗口 W-${String(frame.capturePlan.windowId).padStart(2, "0")} · 修订 R${frame.capturePlan.planRevision}`}
               </span>
+              <small>
+                画质 {qualityPreference === "auto" ? `自动 → ${qualityLabel[resolvedQuality]}` : qualityLabel[resolvedQuality]}
+              </small>
             </div>
           )}
           <Suspense fallback={<div className="panel-loading">正在装载三维视图…</div>}>
@@ -328,6 +394,9 @@ export function Dashboard({
               config={displayedConfig}
               cameraFollow={cameraFollow}
               resetToken={cameraResetToken}
+              qualityPreference={qualityPreference}
+              resolvedQuality={resolvedQuality}
+              onResolvedQualityChange={setAutomaticQuality}
             />
           </Suspense>
           {frame === null ? (
@@ -475,6 +544,7 @@ export function Dashboard({
               <article><strong>参数来源</strong><p>界面将参数标为公开确认、公开估计、代理标定或研究假设；未公开参数不会伪装成官方数据。</p></article>
               <article><strong>可重复性</strong><p>同一配置、算法版本和 seed 产生确定性一致结果；Monte Carlo 使用成对扰动比较四种算法。</p></article>
               <article><strong>状态隔离</strong><p>控制器只消费显式传感器采样、估计结果和虚拟链路投递消息；真实状态仅进入被控对象、指标和只读记录器。</p></article>
+              <article><strong>视觉代理</strong><p>上部挂索环、缆索弯曲、海浪和粒子仅用于解释快照；接触力仍采用质心等效模型，画质偏好不进入场景 JSON 或仿真指纹。</p></article>
               <article><strong>结果解释</strong><p>捕获、稳定、断绳和中止均由显式判据产生，并通过事件、遥测、链路统计和最终指标留痕。</p></article>
             </div>
           </section>

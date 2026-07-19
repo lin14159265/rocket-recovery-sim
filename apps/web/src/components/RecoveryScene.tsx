@@ -1,435 +1,198 @@
-import { memo, useEffect, useMemo, useRef } from "react";
-import { Canvas, useFrame, useThree } from "@react-three/fiber";
-import { Grid, OrbitControls } from "@react-three/drei";
-import * as THREE from "three";
+import { memo, useEffect, useRef, useState } from "react";
+import { Canvas } from "@react-three/fiber";
+import { OrbitControls, PerformanceMonitor } from "@react-three/drei";
 import type { ScenarioConfig, SimulationSnapshot } from "@recovery/sim-core";
+import * as THREE from "three";
+import { CinematicCamera } from "./scene/CinematicCamera";
+import { RecoveryActors } from "./scene/RecoveryActors";
+import { RecoveryEnvironment } from "./scene/RecoveryEnvironment";
+import {
+  QUALITY_PROFILES,
+  observeAutoQuality,
+  type AutoQualityState,
+  type ResolvedSceneQuality,
+  type SceneQualityPreference
+} from "./scene/scene-quality";
+
+const GL_OPTIONS_ANTIALIASED = {
+  antialias: true,
+  powerPreference: "high-performance",
+  alpha: false,
+  stencil: false,
+  toneMapping: THREE.ACESFilmicToneMapping,
+  outputColorSpace: THREE.SRGBColorSpace
+} as const;
+
+const GL_OPTIONS_LIGHTWEIGHT = {
+  ...GL_OPTIONS_ANTIALIASED,
+  antialias: false
+} as const;
+
+const CAMERA_SETTINGS = {
+  position: [126, 102, 146] as [number, number, number],
+  fov: 43,
+  near: 0.2,
+  far: 3_200
+};
+
+const configureRenderer = ({ gl }: { gl: THREE.WebGLRenderer }) => {
+  gl.toneMapping = THREE.ACESFilmicToneMapping;
+  gl.toneMappingExposure = 0.8;
+  gl.outputColorSpace = THREE.SRGBColorSpace;
+  gl.shadowMap.enabled = true;
+  gl.shadowMap.type = THREE.PCFShadowMap;
+};
 
 export interface RecoverySceneProps {
   frame: SimulationSnapshot | null;
   config: ScenarioConfig;
   cameraFollow: boolean;
   resetToken: number;
+  qualityPreference: SceneQualityPreference;
+  resolvedQuality: ResolvedSceneQuality;
+  onResolvedQualityChange: (quality: ResolvedSceneQuality) => void;
 }
 
-type Point3 = [number, number, number];
+export const supportsWebGL2 = (): boolean => {
+  if (typeof document === "undefined") return false;
+  try {
+    const canvas = document.createElement("canvas");
+    const context = canvas.getContext("webgl2", { failIfMajorPerformanceCaveat: true });
+    const supported = context !== null;
+    context?.getExtension("WEBGL_lose_context")?.loseContext();
+    return supported;
+  } catch {
+    return false;
+  }
+};
 
-const UP = new THREE.Vector3(0, 1, 0);
+const useReducedMotion = (): boolean => {
+  const [reduced, setReduced] = useState(() =>
+    typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  );
+  useEffect(() => {
+    const media = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const update = () => setReduced(media.matches);
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+  return reduced;
+};
 
-function Beam({
-  from,
-  to,
-  radius = 0.28,
-  color = "#bf8731",
-  opacity = 1
+function AdaptiveQualityMonitor({
+  preference,
+  resolved,
+  onResolvedChange
 }: {
-  from: Point3;
-  to: Point3;
-  radius?: number;
-  color?: string;
-  opacity?: number;
+  preference: SceneQualityPreference;
+  resolved: ResolvedSceneQuality;
+  onResolvedChange: (quality: ResolvedSceneQuality) => void;
 }) {
-  const transform = useMemo(() => {
-    const start = new THREE.Vector3(...from);
-    const end = new THREE.Vector3(...to);
-    const direction = end.clone().sub(start);
-    const length = direction.length();
-    const midpoint = start.add(end).multiplyScalar(0.5);
-    const quaternion = new THREE.Quaternion().setFromUnitVectors(
-      UP,
-      direction.normalize()
-    );
-    return { length, midpoint, quaternion };
-  }, [from, to]);
-
-  return (
-    <mesh position={transform.midpoint} quaternion={transform.quaternion} castShadow>
-      <cylinderGeometry args={[radius, radius, transform.length, 10]} />
-      <meshStandardMaterial
-        color={color}
-        emissive={color}
-        emissiveIntensity={0.08}
-        metalness={0.58}
-        roughness={0.36}
-        transparent={opacity < 1}
-        opacity={opacity}
-      />
-    </mesh>
-  );
-}
-
-const FrameStructure = memo(function FrameStructure({ config }: { config: ScenarioConfig }) {
-  const { frameHalfWidthM: width, frameHalfDepthM: depth, frameHeightM: height } = config.platform;
-  const captureY = config.platform.capturePlaneZ;
-  const corners: Point3[] = [
-    [-width, 0, -depth],
-    [width, 0, -depth],
-    [width, 0, depth],
-    [-width, 0, depth]
-  ];
-  const top: Point3[] = corners.map(([x, , z]) => [x, height, z]);
-  const capture: Point3[] = corners.map(([x, , z]) => [x, captureY, z]);
-
-  return (
-    <group>
-      <mesh position={[0, -1.1, 0]} receiveShadow>
-        <boxGeometry args={[width * 2.9, 1.8, depth * 2.9]} />
-        <meshStandardMaterial color="#111820" metalness={0.25} roughness={0.72} />
-      </mesh>
-      <mesh position={[0, -0.12, 0]} rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
-        <planeGeometry args={[width * 2.45, depth * 2.45]} />
-        <meshStandardMaterial color="#1c232a" metalness={0.12} roughness={0.9} />
-      </mesh>
-
-      {corners.map((corner, index) => (
-        <Beam
-          key={`post-${index}`}
-          from={corner}
-          to={top[index] ?? corner}
-          radius={0.45}
-        />
-      ))}
-      {[top, capture].flatMap((level, levelIndex) => level.map((point, index) => (
-        <Beam
-          key={`rail-${levelIndex}-${index}`}
-          from={point}
-          to={level[(index + 1) % level.length] ?? point}
-          radius={levelIndex === 0 ? 0.38 : 0.27}
-          opacity={levelIndex === 0 ? 0.95 : 0.68}
-        />
-      )))}
-
-      <mesh position={[0, 0.03, 0]} rotation={[-Math.PI / 2, 0, 0]}>
-        <ringGeometry args={[config.rocket.radiusM * 1.5, config.rocket.radiusM * 1.72, 64]} />
-        <meshBasicMaterial color="#f5b62e" toneMapped={false} />
-      </mesh>
-    </group>
-  );
-});
-
-const RocketModel = memo(function RocketModel({ config }: { config: ScenarioConfig }) {
-  const bodyLength = config.rocket.lengthM;
-  const radius = config.rocket.radiusM;
-  // Visual proxy only: one fifth of the cylindrical body below the nose.
-  // The current plant still uses the centre of mass as its equivalent capture point.
-  const attachmentBandOffsetM = bodyLength * 0.3;
-  return (
-    <group>
-      <mesh castShadow>
-        <cylinderGeometry args={[radius, radius * 0.94, bodyLength, 28]} />
-        <meshStandardMaterial color="#dfe5e7" metalness={0.72} roughness={0.28} />
-      </mesh>
-      <mesh position={[0, bodyLength / 2 + radius * 0.75, 0]} castShadow>
-        <coneGeometry args={[radius, radius * 1.55, 28]} />
-        <meshStandardMaterial color="#edf1f2" metalness={0.55} roughness={0.3} />
-      </mesh>
-      <mesh position={[0, -bodyLength / 2 - radius * 0.6, 0]} castShadow>
-        <coneGeometry args={[radius * 0.82, radius * 1.5, 24]} />
-        <meshStandardMaterial color="#4e5961" metalness={0.82} roughness={0.24} />
-      </mesh>
-      <mesh position={[0, attachmentBandOffsetM, 0]}>
-        <cylinderGeometry args={[radius * 1.015, radius * 1.015, 0.58, 28]} />
-        <meshStandardMaterial color="#131b22" metalness={0.48} roughness={0.4} />
-      </mesh>
-    </group>
-  );
-});
-
-function DynamicActors({ frame, config }: { frame: SimulationSnapshot; config: ScenarioConfig }) {
-  const snapshotRef = useRef(frame);
-  snapshotRef.current = frame;
-  const platformRef = useRef<THREE.Group>(null);
-  const rocketRef = useRef<THREE.Group>(null);
-  const estimateRef = useRef<THREE.Group>(null);
-  const planRef = useRef<THREE.Group>(null);
-  const uncertaintyRef = useRef<THREE.Group>(null);
-  const netMaterialRef = useRef<THREE.LineBasicMaterial>(null);
-
-  const ropeGeometry = useMemo(() => {
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(24), 3));
-    return geometry;
-  }, []);
-  const estimateGeometry = useMemo(() => {
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(6), 3));
-    return geometry;
-  }, []);
-  const planGeometry = useMemo(() => {
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(6), 3));
-    return geometry;
-  }, []);
-  const estimateLine = useMemo(() => new THREE.Line(
-    estimateGeometry,
-    new THREE.LineDashedMaterial({
-      color: "#46dbac",
-      dashSize: 1.4,
-      gapSize: 1.1,
-      transparent: true,
-      opacity: 0.72
-    })
-  ), [estimateGeometry]);
-  const planLine = useMemo(() => new THREE.Line(
-    planGeometry,
-    new THREE.LineDashedMaterial({
-      color: "#ad8cff",
-      dashSize: 1.6,
-      gapSize: 1.2,
-      transparent: true,
-      opacity: 0.72
-    })
-  ), [planGeometry]);
-
-  useEffect(() => () => {
-    ropeGeometry.dispose();
-    estimateGeometry.dispose();
-    planGeometry.dispose();
-    estimateLine.material.dispose();
-    planLine.material.dispose();
-  }, [estimateGeometry, estimateLine, planGeometry, planLine, ropeGeometry]);
-
-  useFrame(() => {
-    const snapshot = snapshotRef.current;
-    const platform = snapshot.platform;
-    const rocket = snapshot.rocket;
-    const platformGroup = platformRef.current;
-    const rocketGroup = rocketRef.current;
-    if (platformGroup === null || rocketGroup === null) return;
-
-    platformGroup.rotation.set(platform.rollRad, 0, -platform.pitchRad);
-    const rocketPosition: Point3 = [
-      rocket.positionM[0] - platform.positionM[0],
-      rocket.positionM[2] - platform.positionM[2],
-      rocket.positionM[1] - platform.positionM[1]
-    ];
-    rocketGroup.position.set(...rocketPosition);
-    rocketGroup.quaternion.set(
-      rocket.attitudeWxyz[1],
-      rocket.attitudeWxyz[3],
-      rocket.attitudeWxyz[2],
-      rocket.attitudeWxyz[0]
-    ).normalize();
-
-    const estimate = snapshot.groundEstimate.positionM;
-    estimateRef.current?.position.set(
-      estimate[0] - platform.positionM[0],
-      estimate[2] - platform.positionM[2],
-      estimate[1] - platform.positionM[1]
-    );
-    const planPosition: Point3 = [
-      (snapshot.capturePlan?.predictedInterceptPositionM[0] ?? snapshot.net.centerM[0]) - platform.positionM[0],
-      (snapshot.capturePlan?.predictedInterceptPositionM[2] ?? config.platform.capturePlaneZ) - platform.positionM[2],
-      (snapshot.capturePlan?.predictedInterceptPositionM[1] ?? snapshot.net.centerM[1]) - platform.positionM[1]
-    ];
-    planRef.current?.position.set(...planPosition);
-    uncertaintyRef.current?.position.set(...planPosition);
-
-    const width = config.platform.frameHalfWidthM;
-    const depth = config.platform.frameHalfDepthM;
-    const planeY = config.platform.capturePlaneZ;
-    const [centerX, centerZ] = snapshot.net.centerM;
-    const [halfX, halfZ] = snapshot.net.halfSpacingM;
-    const positions = ropeGeometry.getAttribute("position") as THREE.BufferAttribute;
-    positions.set([
-      -width, planeY, centerZ - halfZ, width, planeY, centerZ - halfZ,
-      -width, planeY, centerZ + halfZ, width, planeY, centerZ + halfZ,
-      centerX - halfX, planeY, -depth, centerX - halfX, planeY, depth,
-      centerX + halfX, planeY, -depth, centerX + halfX, planeY, depth
-    ]);
-    positions.needsUpdate = true;
-    ropeGeometry.computeBoundingSphere();
-
-    const estimatePositions = estimateGeometry.getAttribute("position") as THREE.BufferAttribute;
-    estimatePositions.set([
-      ...rocketPosition,
-      estimate[0] - platform.positionM[0],
-      estimate[2] - platform.positionM[2],
-      estimate[1] - platform.positionM[1]
-    ]);
-    estimatePositions.needsUpdate = true;
-    estimateGeometry.computeBoundingSphere();
-    estimateLine.computeLineDistances();
-
-    const plan = snapshot.capturePlan?.predictedInterceptPositionM;
-    if (planRef.current !== null) planRef.current.visible = plan !== undefined;
-    if (uncertaintyRef.current !== null) {
-      uncertaintyRef.current.visible = plan !== undefined;
-      uncertaintyRef.current.scale.set(
-        Math.max(0.8, (snapshot.capturePlan?.predictionUncertaintyM[0] ?? 0) * 3),
-        Math.max(0.8, (snapshot.capturePlan?.predictionUncertaintyM[1] ?? 0) * 3),
-        1
-      );
-    }
-    planLine.visible = plan !== undefined;
-    const planPositions = planGeometry.getAttribute("position") as THREE.BufferAttribute;
-    planPositions.set([
-      estimate[0] - platform.positionM[0],
-      estimate[2] - platform.positionM[2],
-      estimate[1] - platform.positionM[1],
-      (plan?.[0] ?? snapshot.net.centerM[0]) - platform.positionM[0],
-      (plan?.[2] ?? config.platform.capturePlaneZ) - platform.positionM[2],
-      (plan?.[1] ?? snapshot.net.centerM[1]) - platform.positionM[1]
-    ]);
-    planPositions.needsUpdate = true;
-    planGeometry.computeBoundingSphere();
-    planLine.computeLineDistances();
-
-    const peakTension = Math.max(...snapshot.net.tensionsN);
-    const ratio = peakTension / Math.max(1, config.net.totalStrengthLimitN / 4);
-    netMaterialRef.current?.color.set(ratio > 0.9 ? "#ff5f56" : ratio > 0.55 ? "#ffb13b" : "#3bd9ff");
+  const stateRef = useRef<AutoQualityState>({
+    resolved,
+    poorWindows: 0,
+    stableWindows: 0,
+    lastChangeMs: -30_000
   });
-
-  return (
-    <>
-      <group ref={platformRef}>
-        <FrameStructure config={config} />
-        <lineSegments geometry={ropeGeometry}>
-          <lineBasicMaterial ref={netMaterialRef} color="#3bd9ff" linewidth={2} toneMapped={false} />
-        </lineSegments>
-      </group>
-
-      <group ref={rocketRef}>
-        <RocketModel config={config} />
-      </group>
-
-      <group ref={estimateRef}>
-        <mesh rotation={[-Math.PI / 2, 0, 0]}>
-          <ringGeometry args={[config.rocket.radiusM * 1.25, config.rocket.radiusM * 1.55, 40]} />
-          <meshBasicMaterial color="#46dbac" transparent opacity={0.82} toneMapped={false} />
-        </mesh>
-      </group>
-      <primitive object={estimateLine} />
-
-      <group ref={planRef}>
-        <mesh rotation={[-Math.PI / 2, 0, 0]}>
-          <ringGeometry args={[1.7, 2.1, 40]} />
-          <meshBasicMaterial color="#ad8cff" transparent opacity={0.9} toneMapped={false} />
-        </mesh>
-      </group>
-      <group ref={uncertaintyRef} rotation={[-Math.PI / 2, 0, 0]}>
-        <mesh>
-          <circleGeometry args={[1, 64]} />
-          <meshBasicMaterial
-            color="#b77aff"
-            transparent
-            opacity={0.09}
-            depthWrite={false}
-            side={THREE.DoubleSide}
-            toneMapped={false}
-          />
-        </mesh>
-        <mesh position={[0, 0, 0.01]}>
-          <ringGeometry args={[0.985, 1, 64]} />
-          <meshBasicMaterial color="#b77aff" transparent opacity={0.72} toneMapped={false} />
-        </mesh>
-      </group>
-      <primitive object={planLine} />
-    </>
-  );
-}
-
-function TrackingCamera({
-  frame,
-  config,
-  enabled,
-  resetToken
-}: {
-  frame: SimulationSnapshot | null;
-  config: ScenarioConfig;
-  enabled: boolean;
-  resetToken: number;
-}) {
-  const { camera } = useThree();
-  const frameRef = useRef(frame);
-  frameRef.current = frame;
-  const target = useMemo(() => new THREE.Vector3(), []);
-  const desiredPosition = useMemo(() => new THREE.Vector3(), []);
 
   useEffect(() => {
-    camera.position.set(145, 118, 150);
-    camera.lookAt(0, config.platform.capturePlaneZ * 0.7, 0);
-  }, [camera, config.platform.capturePlaneZ, resetToken]);
+    stateRef.current = { ...stateRef.current, resolved };
+  }, [resolved]);
 
-  useFrame((_, delta) => {
-    if (!enabled || frameRef.current === null) return;
-    const snapshot = frameRef.current;
-    const rocketAltitude = snapshot.rocket.positionM[2] - snapshot.platform.positionM[2];
-    const focusY = Math.max(
-      config.platform.capturePlaneZ * 0.72,
-      (rocketAltitude + config.platform.capturePlaneZ) * 0.5
-    );
-    const verticalSpan = Math.max(105, Math.abs(rocketAltitude - config.platform.capturePlaneZ) + 72);
-    // Keep the platform and the descending stage inside the 42° vertical field of view.
-    // The previous multiplier framed only about two thirds of their vertical span.
-    const distance = Math.min(1_250, verticalSpan * 1.34);
-    target.set(snapshot.net.centerM[0], focusY, snapshot.net.centerM[1]);
-    desiredPosition.set(distance * 0.68, focusY + distance * 0.2, distance * 0.76);
-    const alpha = 1 - Math.exp(-delta * 2.8);
-    camera.position.lerp(desiredPosition, alpha);
-    camera.lookAt(target);
-  });
+  if (preference !== "auto") return null;
+  const observe = (signal: "poor" | "stable") => {
+    const next = observeAutoQuality(stateRef.current, signal, performance.now());
+    stateRef.current = next;
+    if (next.resolved !== resolved) onResolvedChange(next.resolved);
+  };
 
-  return null;
-}
-
-function SceneContents({ frame, config, cameraFollow, resetToken }: RecoverySceneProps) {
   return (
-    <>
-      <color attach="background" args={["#07111b"]} />
-      <fog attach="fog" args={["#07111b", 190, 1_500]} />
-      <ambientLight intensity={0.68} />
-      <directionalLight
-        position={[70, 150, 100]}
-        intensity={2.1}
-        color="#e9f5ff"
-        castShadow
-        shadow-mapSize-width={1024}
-        shadow-mapSize-height={1024}
-      />
-      <directionalLight position={[-120, 80, -80]} intensity={0.65} color="#47b5ff" />
-      <Grid
-        args={[420, 420]}
-        position={[0, -2.2, 0]}
-        cellSize={5}
-        cellThickness={0.42}
-        cellColor="#1c3448"
-        sectionSize={25}
-        sectionThickness={0.8}
-        sectionColor="#2e5973"
-        fadeDistance={330}
-        fadeStrength={1.25}
-        infiniteGrid
-      />
-      <mesh position={[0, -3, 0]} rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
-        <planeGeometry args={[760, 760]} />
-        <meshStandardMaterial color="#071a27" metalness={0.12} roughness={0.82} />
-      </mesh>
-      {frame === null ? <FrameStructure config={config} /> : <DynamicActors frame={frame} config={config} />}
-      <TrackingCamera frame={frame} config={config} enabled={cameraFollow} resetToken={resetToken} />
-      <OrbitControls
-        enabled={!cameraFollow}
-        makeDefault
-        enableDamping
-        dampingFactor={0.08}
-        minDistance={55}
-        maxDistance={1_500}
-        maxPolarAngle={Math.PI * 0.49}
-        target={[0, config.platform.capturePlaneZ * 0.7, 0]}
-      />
-    </>
+    <PerformanceMonitor
+      bounds={(refreshRate) => [Math.min(42, refreshRate * 0.62), Math.min(58, refreshRate * 0.9)]}
+      flipflops={4}
+      onDecline={() => observe("poor")}
+      onIncline={() => observe("stable")}
+      onFallback={() => onResolvedChange("low")}
+    />
   );
 }
 
+const SceneContents = memo(function SceneContents(props: RecoverySceneProps & { reducedMotion: boolean }) {
+  const profile = QUALITY_PROFILES[props.resolvedQuality] ?? QUALITY_PROFILES.low;
+  return (
+    <>
+      <RecoveryEnvironment
+        frame={props.frame}
+        config={props.config}
+        profile={profile}
+        reducedMotion={props.reducedMotion}
+      />
+      <RecoveryActors
+        frame={props.frame}
+        config={props.config}
+        profile={profile}
+        reducedMotion={props.reducedMotion}
+      />
+      <CinematicCamera
+        frame={props.frame}
+        config={props.config}
+        enabled={props.cameraFollow}
+        resetToken={props.resetToken}
+        reducedMotion={props.reducedMotion}
+      />
+      <OrbitControls
+        enabled={!props.cameraFollow}
+        makeDefault
+        enableDamping
+        dampingFactor={0.075}
+        minDistance={42}
+        maxDistance={1_500}
+        maxPolarAngle={Math.PI * 0.49}
+        target={[0, props.config.platform.capturePlaneZ * 0.72, 0]}
+      />
+      <AdaptiveQualityMonitor
+        preference={props.qualityPreference}
+        resolved={props.resolvedQuality}
+        onResolvedChange={props.onResolvedQualityChange}
+      />
+    </>
+  );
+});
+
 export function RecoveryScene(props: RecoverySceneProps) {
+  const reducedMotion = useReducedMotion();
+  const [webgl2Supported] = useState(supportsWebGL2);
+  if (!webgl2Supported) {
+    return (
+      <div className="scene-webgl-fallback" role="status">
+        <strong>增强三维效果不可用</strong>
+        <span>当前浏览器未提供可用的 WebGL2；控制算法、图表和回放仍可正常使用。</span>
+      </div>
+    );
+  }
+  if (props.frame === null) {
+    return (
+      <div className="scene-vfx-loading" role="status">
+        <strong>正在装载确定性三维回放</strong>
+        <span>等待物理快照后再分配高画质 WebGL 目标。</span>
+      </div>
+    );
+  }
+  const profile = QUALITY_PROFILES[props.resolvedQuality] ?? QUALITY_PROFILES.low;
+  // The current ANGLE/D3D path returns an all-white canvas for a 1.5 DPR
+  // WebGL target at this panel size. Preserve the high-tier scene budgets,
+  // while capping the verified render target to the stable 1.25 DPR path.
+  const renderDpr = Math.min(profile.dpr, 1.25);
   return (
     <Canvas
+      key={profile.id}
       className="recovery-canvas"
-      dpr={[1, 1.7]}
-      shadows="basic"
-      gl={{ antialias: true, powerPreference: "high-performance" }}
-      camera={{ position: [145, 118, 150], fov: 42, near: 0.1, far: 3_000 }}
+      dpr={renderDpr}
+      gl={profile.antialias ? GL_OPTIONS_ANTIALIASED : GL_OPTIONS_LIGHTWEIGHT}
+      onCreated={configureRenderer}
+      camera={CAMERA_SETTINGS}
     >
-      <SceneContents {...props} />
+      <SceneContents {...props} reducedMotion={reducedMotion} />
     </Canvas>
   );
 }

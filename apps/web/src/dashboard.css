@@ -251,6 +251,15 @@
   background: #07111b;
 }
 
+.scene-panel::after {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  pointer-events: none;
+  content: "";
+  background: radial-gradient(circle at 52% 44%, transparent 56%, rgba(2, 7, 12, 0.12) 76%, rgba(1, 5, 9, 0.42) 100%);
+}
+
 .recovery-canvas {
   position: absolute !important;
   inset: 0;
@@ -294,6 +303,15 @@
 .scene-status-overlay span {
   color: #91a6b8;
   font-size: 9px;
+}
+
+.scene-status-overlay small {
+  padding-top: 4px;
+  margin-top: 2px;
+  border-top: 1px solid rgba(109, 133, 151, 0.22);
+  color: #c7d0d5;
+  font-size: 8px;
+  letter-spacing: 0.04em;
 }
 
 .panel-corner-label strong {
@@ -341,6 +359,80 @@
   width: 14px;
   height: 0;
   border-top: 2px dashed currentColor;
+}
+
+.scene-quality-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 41px;
+  padding: 0 8px;
+  border: 1px solid #2a3c4e;
+  border-radius: 5px;
+  color: #9aabba;
+  background: rgba(11, 23, 34, 0.84);
+  font-size: 10px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.scene-quality-control svg {
+  color: #68b9dc;
+}
+
+.scene-quality-control select {
+  height: 27px;
+  padding: 0 19px 0 6px;
+  border: 1px solid rgba(72, 102, 127, 0.72);
+  border-radius: 3px;
+  color: #d6e1e8;
+  background: #0a1721;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.scene-webgl-fallback {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  gap: 6px;
+  padding: 28px;
+  color: #879aa9;
+  background: radial-gradient(circle at 50% 38%, #172631, #07111b 68%);
+  text-align: center;
+}
+
+.scene-vfx-loading {
+  position: absolute;
+  z-index: 1;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  gap: 7px;
+  color: #c2d2dd;
+  text-align: center;
+  background: radial-gradient(circle at 50% 42%, rgba(30, 62, 80, 0.32), rgba(5, 13, 21, 0.96) 64%);
+}
+
+.scene-vfx-loading strong {
+  font-size: 13px;
+}
+
+.scene-vfx-loading span {
+  color: #748b9b;
+  font-size: 10px;
+}
+
+.scene-webgl-fallback strong {
+  color: #dbe5ea;
+  font-size: 14px;
+}
+
+.scene-webgl-fallback span {
+  max-width: 360px;
+  font-size: 10px;
+  line-height: 1.6;
 }
 
 .legend-area {
@@ -1450,6 +1542,9 @@
   .dashboard-camera-actions .tool-button { width: 44px; padding: 0; }
   .dashboard-camera-actions .tool-button svg + * { display: none; }
   .dashboard-camera-actions .tool-button { font-size: 0; gap: 0; }
+  .scene-quality-control > span { display: none; }
+  .scene-quality-control { gap: 4px; padding: 0 6px; }
+  .scene-quality-control select { width: 52px; padding-right: 12px; }
   .dashboard-workspace { grid-template-columns: minmax(420px, 1.3fr) minmax(390px, 1fr) minmax(305px, 0.72fr); }
   .playback-bar { grid-template-columns: auto minmax(250px, 1fr) 70px auto minmax(135px, 0.2fr); gap: 12px; padding: 9px 12px; }
   .restart-button, .play-button { height: 50px; min-width: 94px; }
@@ -1461,7 +1556,8 @@
   .recovery-dashboard {
     display: block;
     min-height: 100%;
-    overflow: auto;
+    overflow-x: hidden;
+    overflow-y: auto;
   }
 
   .dashboard-header {
@@ -1551,6 +1647,18 @@
     grid-template-rows: 540px 820px 760px;
   }
 
+  .dashboard-camera-actions {
+    flex-wrap: wrap;
+  }
+
+  .scene-quality-control {
+    flex: 1 1 100%;
+    justify-content: center;
+  }
+
+  .scene-quality-control > span { display: inline; }
+  .scene-quality-control select { width: auto; }
+
   .inspector-panel {
     grid-column: auto;
     min-height: 0;
@@ -1586,12 +1694,13 @@
     padding: 11px;
   }
 
-  .playback-actions { grid-column: 1 / 2; }
+  .playback-actions { grid-column: 1 / -1; gap: 6px; }
   .timeline-control { grid-column: 1 / -1; grid-row: 2; }
-  .speed-select { grid-column: 2; grid-row: 1; }
-  .determinism-readout { grid-column: 1 / -1; grid-row: 3; justify-content: center; }
+  .speed-select { grid-column: 2; grid-row: 3; }
+  .determinism-readout { grid-column: 1; grid-row: 3; justify-content: flex-start; }
   .playback-status { grid-column: 1 / -1; grid-row: 4; min-height: 40px; padding: 8px 0 0; border-top: 1px solid #263a4c; border-left: 0; }
-  .restart-button, .play-button { min-width: 90px; }
+  .restart-button, .play-button { min-width: 0; flex: 1 1 0; }
+  .step-button { width: 38px; flex: 0 0 38px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
